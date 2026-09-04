@@ -1,0 +1,119 @@
+# ---------------------------------------------------------------------------
+# Datasets and generated artifacts
+#
+# Ignore everything under data/ but keep the directory skeleton, so a fresh
+# clone has somewhere to download benchmarks into. The three-line idiom is
+# deliberate: `data/` alone would stop git descending into the directory at
+# all, and the !.gitkeep negation would never be reached.
+# ---------------------------------------------------------------------------
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Trained models, calibrators and thresholds
+models/
+*.pkl
+*.joblib
+*.lgb
+*.onnx
+*.pt
+*.safetensors
+
+# Blocking indexes and cached embeddings — regenerable, and large
+*.hnsw
+*.index
+*.faiss
+*.npy
+*.npz
+embeddings_cache/
+.sentence_transformers_cache/
+
+# Record store
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+
+# Experiment tracking
+mlruns/
+wandb/
+lightning_logs/
+
+# NOTE: reports/ is intentionally NOT ignored. The blocking table, PR curves
+# and cost curves are the defensible results of this project — they belong in
+# version control.
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+.tox/
+.nox/
+.hypothesis/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# ---------------------------------------------------------------------------
+# Jupyter
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+
+# ---------------------------------------------------------------------------
+# Editors and OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Claude Code
+#
+# .claude/settings.json IS tracked (shared permission rules).
+# Personal overrides are not.
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+.claude/worktrees/
