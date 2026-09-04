@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dedup"
+version = "0.1.0"
+description = "Entity-resolution / deduplication service for e-commerce product listings"
+requires-python = ">=3.10"
+dependencies = [
+    # tabular / numeric infra (not called out in CLAUDE.md's Stack section
+    # since it's uncontroversial, but every stage needs it)
+    "numpy",
+    "pandas",
+    "scikit-learn",       # PR-AUC/precision@k metrics, isotonic/Platt calibration
+    # blocking
+    "rapidfuzz",           # string distances -- C++ backed, not fuzzywuzzy
+    "datasketch",          # MinHash-LSH blocker
+    "hnswlib",             # ANN blocker
+    # features
+    "sentence-transformers",
+    # model
+    "lightgbm",
+    # storage / service
+    "duckdb",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
