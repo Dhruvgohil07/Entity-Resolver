@@ -16,7 +16,11 @@ dependencies = [
     # blocking
     "rapidfuzz",           # string distances -- C++ backed, not fuzzywuzzy
     "datasketch",          # MinHash-LSH blocker
-    "hnswlib",             # ANN blocker
+    "faiss-cpu",            # ANN blocker (IndexHNSWFlat) -- swapped in for
+    # hnswlib, which ships no PyPI wheel for any platform (sdist-only, needs
+    # an MSVC C++ toolchain this machine doesn't have). faiss-cpu has a real
+    # win_amd64 wheel and implements the same HNSW algorithm via
+    # IndexHNSWFlat, so this is a binding swap, not a design change.
     # features
     "sentence-transformers",
     # model

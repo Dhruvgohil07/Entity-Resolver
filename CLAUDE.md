@@ -85,7 +85,12 @@ reports/          blocking table, PR curves, cost curves — the defensible resu
 
 - `rapidfuzz` for string distances, **not** `fuzzywuzzy` — C++ backed, orders of magnitude faster, which
   is load-bearing when computing several metrics over millions of pairs.
-- `datasketch` (MinHash-LSH) and `hnswlib` (ANN) are the two sublinear blockers.
+- `datasketch` (MinHash-LSH) and `faiss-cpu` (ANN, via `IndexHNSWFlat`) are the two sublinear
+  blockers. `faiss-cpu` replaces `hnswlib` — `hnswlib` has no PyPI wheel for any platform and needs
+  an MSVC C++ toolchain to build on Windows, which the dev machine doesn't have; verified by a direct
+  `pip download --only-binary=:all:` probe, not assumed. `faiss-cpu` ships a real win_amd64 wheel and
+  implements the same HNSW algorithm, so `blocking/ann.py` can be built against it with no design
+  change from the original hnswlib plan.
 - `sentence-transformers` embeddings are complementary to string distance, not a replacement: they catch
   paraphrase and miss fine distinctions (`WH-1000XM4` vs `WH-1000XM5`), string metrics do the opposite.
 - LightGBM over the pair features; a fine-tuned cross-encoder is the optional ceiling comparison.
