@@ -81,3 +81,57 @@ def test_entity_id_serve_time_vs_benchmark_shape():
     benchmark = _full_record(entity_id="entity-1")
     assert serve_time.entity_id is None
     assert benchmark.entity_id == "entity-1"
+
+
+# ---------------------------------------------------------------------------
+# Regressions: validation gaps that only bite once a CSV loader exists
+#
+# Each of these constructed a valid-looking Record before the fix. They are
+# the shapes a real source row produces -- a padded CSV cell, a pandas NaN
+# where a price was missing, a column name nobody mapped.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["record_id", "title"])
+@pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n", " \t\n "])
+def test_whitespace_only_required_string_rejected(field, blank):
+    # min_length=1 counts characters, so " " satisfied it.
+    with pytest.raises(ValidationError):
+        _full_record(**{field: blank})
+
+
+def test_surrounding_whitespace_stripped_from_required_strings():
+    # A padded record_id joins against nothing in a ground-truth pair file.
+    record = _full_record(record_id="  abt_buy:10\t", title="  Sony Widget 3000  ")
+    assert record.record_id == "abt_buy:10"
+    assert record.title == "Sony Widget 3000"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_price_rejected(value):
+    # `v < 0` is False for NaN (every NaN comparison is) and for +inf, so both
+    # passed the original non-negative check. A NaN price then propagates
+    # through numeric features silently.
+    with pytest.raises(ValidationError):
+        _full_record(price=value)
+
+
+def test_missing_price_is_none_not_nan():
+    # The convention downstream code relies on: absence is None. This is the
+    # positive half of test_non_finite_price_rejected.
+    assert _full_record(price=None).price is None
+
+
+def test_unknown_field_rejected():
+    # extra="ignore" dropped both of these silently: a typo'd field name lost
+    # the column's data, and an unmapped source column looked accepted.
+    with pytest.raises(ValidationError):
+        _full_record(titel="Sony Widget 3000")
+    with pytest.raises(ValidationError):
+        _full_record(manufacturer_url="http://example.invalid/p/10")
+
+
+def test_unmapped_source_column_belongs_in_raw_attributes():
+    # The sanctioned home for a column with no canonical field.
+    record = _full_record(raw_attributes={"manufacturer_url": "http://example.invalid/p/10"})
+    assert record.raw_attributes["manufacturer_url"] == "http://example.invalid/p/10"

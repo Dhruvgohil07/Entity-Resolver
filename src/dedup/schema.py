@@ -10,14 +10,24 @@ per CLAUDE.md's Data section treating DBLP as deferred. `raw_attributes` is
 the escape hatch for source columns that don't map onto a canonical field.
 """
 
-from typing import Any, Literal
+import math
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 # Sources a loader is allowed to claim. Extend when a new loader is added
 # (e.g. a DBLP source, if that work ever starts) -- keep this in sync with
 # any loader module's own literal checks.
 SourceName = Literal["abt_buy", "amazon_google", "synthetic"]
+
+# min_length=1 alone admits " ": a whitespace-only id or title is a
+# malformed source row, not a short one. StringConstraints strips first and
+# then applies the length floor, so the blank case fails validation instead
+# of travelling downstream. Stripping is safe at this boundary because
+# surrounding whitespace carries no information -- normalize() would fold it
+# away regardless, and an untrimmed record_id silently fails to join against
+# a ground-truth pair file.
+NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class Record(BaseModel):
@@ -27,11 +37,19 @@ class Record(BaseModel):
     type before anything touches normalize/blocking/features/model/cluster.
     """
 
+    # extra="forbid", not the default "ignore". A loader that passes a
+    # misspelled or unmapped column ("titel=", or a source column nobody
+    # mapped) should fail at the boundary rather than construct a Record
+    # missing that data -- under "ignore" the field is silently dropped and
+    # only shows up as unexplained blocking recall several stages later.
+    # Columns with no canonical home go in raw_attributes, explicitly.
+    model_config = ConfigDict(extra="forbid")
+
     # f"{source}:{raw_source_id}" by convention -- raw per-source ids collide
     # across sources (Abt id "10" and Buy id "10" are unrelated), so
     # record_id is never just the bare source id. Not enforced by a regex
     # here (over-constrains loaders); documented and exercised by a test.
-    record_id: str = Field(min_length=1)
+    record_id: NonBlankStr
 
     source: SourceName
 
@@ -45,7 +63,7 @@ class Record(BaseModel):
     # Required: every in-scope source always has a name/title. A title-less
     # record can't be scored by the TF-IDF baseline or any string feature,
     # so this is the one thing schema.py refuses to let through empty.
-    title: str = Field(min_length=1)
+    title: NonBlankStr
 
     # Convention: None = "source did not have this column populated";
     # "" = "column present but empty in source". Loaders must preserve this
@@ -75,7 +93,16 @@ class Record(BaseModel):
 
     @field_validator("price")
     @classmethod
-    def _price_non_negative(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
+    def _price_is_finite_and_non_negative(cls, v: float | None) -> float | None:
+        # NaN and inf both survive a bare `v < 0` check -- every comparison
+        # against NaN is False, and inf is genuinely greater than 0. Either
+        # one poisons features/numeric.py's relative-difference arithmetic
+        # (NaN propagates through the whole feature vector) with no error to
+        # trace it back to. A missing price is None; it is never NaN.
+        if v is None:
+            return v
+        if not math.isfinite(v):
+            raise ValueError("price must be a finite number (got NaN or infinity)")
+        if v < 0:
             raise ValueError("price must be non-negative")
         return v
