@@ -1,0 +1,9 @@
+# The Abt-Buy test fixtures must round-trip byte-for-byte.
+#
+# core.autocrlf is true on the dev machine, so without this git would rewrite
+# their line endings on checkout. Two things that are asserted in
+# tests/test_data_abt_buy.py depend on the exact bytes: Abt.csv is cp1252 and
+# must stay undecodable as UTF-8, and CLAUDE.md documents that regenerating
+# the fixtures with tests/fixtures/make_fixtures.py is a no-op. A clone that
+# silently swapped CRLF for LF would break that second claim on the first run.
+tests/fixtures/abt-buy/*.csv -text

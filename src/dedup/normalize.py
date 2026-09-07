@@ -70,13 +70,17 @@ _UNIT_RULES: list[tuple[re.Pattern[str], str]] = [
     # so the optional period is consumed instead of being left stranded as
     # "cu ft.".
     (re.compile(r"\bcu\.?\s*ft\b\.?"), "cu ft"),
-    # ' is the foot mark and " is the inch mark. A listing that writes 24'
-    # for a 24-inch TV is a source typo, not a convention worth encoding --
-    # cables and wire, which really are sold by the foot, are the commoner
-    # use of ' in this catalog. The lookahead protects possessives: without
-    # it "1980's" folds to "1980 ft s". " has no possessive collision, and
+    # ' is the foot mark typographically, but this catalog uses it for
+    # inches and never for feet -- measured, not assumed: all 249 digit+'
+    # occurrences across Abt.csv and Buy.csv are screen and driver sizes
+    # ("3.0' LCD Display", "32' to 50' LCD", "4' x 6' Print Paper",
+    # "1-1/8' Dome Tweeter"), and zero are lengths in feet. Normalize exists
+    # to make duplicates compare equal, so it follows the source convention
+    # rather than the typographic one; revisit if a source that really does
+    # sell by the foot is added. The lookahead protects possessives --
+    # without it "1980's" folds to "1980 in s". " needs no such guard, and
     # 5"W (5 inches wide) is a real spelling, so that rule takes none.
-    (re.compile(r"(?<=\d)\s*['′](?![A-Za-z])"), " ft"),
+    (re.compile(r"(?<=\d)\s*['′](?![A-Za-z])"), " in"),
     (re.compile(r'(?<=\d)\s*["″]'), " in"),
     (re.compile(r"\bin\.(?=\s|$)"), "in"),
     (re.compile(r"(?<=\d)\s*(?:inches|inch)\b"), " in"),

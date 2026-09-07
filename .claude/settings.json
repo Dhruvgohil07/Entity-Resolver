@@ -1,7 +1,36 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "env": {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8"
+  },
+
   "permissions": {
-    "deny": [],
+    "deny": [
+      "Edit(data/raw/**)",
+      "Write(data/raw/**)",
+
+      "Read(.env)",
+      "Read(**/.env)",
+
+      "Bash(rm:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "PowerShell(Remove-Item:*)",
+      "PowerShell(git push --force:*)",
+      "PowerShell(git reset --hard:*)"
+    ],
+
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "PowerShell(git commit:*)",
+      "PowerShell(git push:*)"
+    ],
+
     "allow": [
       "Read",
       "Glob",
@@ -54,8 +83,6 @@
       "Bash(git branch:*)",
       "Bash(git remote:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
 
       "PowerShell(Get-ChildItem:*)",
       "PowerShell(Get-Content:*)",
@@ -78,9 +105,7 @@
       "PowerShell(git show:*)",
       "PowerShell(git branch:*)",
       "PowerShell(git remote:*)",
-      "PowerShell(git add:*)",
-      "PowerShell(git commit:*)",
-      "PowerShell(git push:*)"
+      "PowerShell(git add:*)"
     ]
   }
 }

@@ -45,9 +45,13 @@ class Record(BaseModel):
     # Columns with no canonical home go in raw_attributes, explicitly.
     model_config = ConfigDict(extra="forbid")
 
-    # f"{source}:{raw_source_id}" by convention -- raw per-source ids collide
-    # across sources (Abt id "10" and Buy id "10" are unrelated), so
-    # record_id is never just the bare source id. Not enforced by a regex
+    # Starts with the source and is globally unique: f"{source}:{raw_id}" at
+    # minimum, since raw ids collide across datasets. A loader may need more
+    # segments than that. Abt-Buy is one source with two sides whose ids
+    # collide independently -- Abt "10" and Buy "10" are unrelated products --
+    # so dedup/data/abt_buy.py emits "abt_buy:abt:10". How many segments come
+    # after the source is the loader's business; the invariant is only that
+    # the whole string is unique and source-prefixed. Not enforced by a regex
     # here (over-constrains loaders); documented and exercised by a test.
     record_id: NonBlankStr
 

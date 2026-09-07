@@ -146,11 +146,15 @@ def test_abbreviations_with_trailing_period_are_canonicalized():
     assert normalized_title == "sony speaker 12.5 in deep 8 lb 6 oz"
 
 
-def test_foot_mark_and_inch_mark_map_to_different_units():
-    feet = Record(record_id="abt_buy:3", source="abt_buy", title="Monster 6' HDMI Cable")
-    inches = Record(record_id="abt_buy:4", source="abt_buy", title='Sony 6" LCD Monitor')
-    assert "6 ft" in normalize(feet).normalized_title
-    assert "6 in" in normalize(inches).normalized_title
+def test_both_quote_marks_fold_to_inches():
+    # Measured against the real CSVs, not assumed from typography: all 249
+    # digit+' occurrences in Abt.csv/Buy.csv are inch measurements ("3.0'
+    # LCD Display", "32' to 50' LCD", "1-1/8' Dome Tweeter") and none are
+    # feet. A source that writes 32' must match one that writes 32".
+    apostrophe = Record(record_id="abt_buy:3", source="abt_buy", title="Sony 32' LCD TV")
+    quote = Record(record_id="abt_buy:4", source="abt_buy", title='Sony 32" LCD TV')
+    assert normalize(apostrophe).normalized_title == normalize(quote).normalized_title
+    assert "32 in" in normalize(apostrophe).normalized_title
 
 
 def test_possessive_apostrophe_after_digit_is_left_alone():
