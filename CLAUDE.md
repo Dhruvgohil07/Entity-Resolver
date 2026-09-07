@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Two stages implemented, both with tests (`pytest` → 24 passing):
+Two stages implemented, both with tests (`pytest` → 49 passing):
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -19,16 +19,20 @@ blocking cannot be evaluated on pair completeness until there is loaded data wit
 Commands in this file describe the intended contract — verify a command exists before relying on it,
 and update this file as each phase lands.
 
-### Known issues (open)
+### Open questions
 
-A code review found real defects in `normalize.py` that are **not yet fixed** — its output is not
-yet trustworthy. In brief: three of the six unit regexes are dead (a trailing `\b` after `\.` can
-never match before a space), the `cu ft` rule leaves a stray period, the apostrophe rule maps the
-*foot* mark to inches (and mangles possessives), and model-number extraction's trailing-delimiter
-branch checks for `" - "` but then takes the last token unconditionally — so specs like `1200W` and
-`12MP` are returned as model numbers, which would become high-weight false blocking keys.
-`schema.py` separately accepts NaN/`inf` prices, whitespace-only `title`/`record_id`, and silently
-ignores unknown field names (`extra="ignore"`), all of which matter once a CSV loader exists.
+The code-review defects in `normalize.py` and `schema.py` are fixed, each pinned by a regression
+test naming the failure mode. Two judgment calls in those fixes are worth revisiting against real
+labeled data rather than treating as settled:
+
+- **`'` now folds to feet, not inches.** It is the foot mark typographically, and cables/wire sold
+  by the foot are the commoner use of `'` in this catalog. But normalize exists to make duplicates
+  compare *equal*, not to be unit-correct — if one source writes `24"` and another `24'` for the
+  same TV, the old inches mapping matched them and this one does not. Re-measure on Abt-Buy.
+- **The spec-suffix list in `_SPEC_UNIT_SUFFIXES` is conservative on purpose.** It rejects `1200W`
+  and `12MP` as model numbers while deliberately omitting `wh` and `a`, which collide with real
+  vendor codes (Bose 161WH, HP Officejet 8500A). A false model number fuses unrelated products into
+  one block; a missing one only loses a signal — so the list should grow only against evidence.
 
 ## What this is
 
@@ -142,7 +146,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (24 passing)
+pytest                                  # all (49 passing)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
