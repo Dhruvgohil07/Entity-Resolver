@@ -56,13 +56,36 @@ def _fold_optional(text: str | None) -> str | None:
 # Seeded from real Abt-Buy titles seen while designing this module (e.g.
 # "4.2 Cu. Ft.", "24' White..."); extend as more sources/spellings turn up
 # once the actual benchmark CSVs are downloaded.
+#
+# Trailing-boundary rule: a pattern must never end in `\.\b`. A `\b` after a
+# literal "." needs a word character next, so `\bin\.\b` cannot match "in."
+# followed by a space or end-of-string -- exactly the position the rule
+# exists for. Anchor the boundary on the letters (`ft\b\.?`) or state it
+# explicitly as a lookahead (`\.(?=\s|$)`).
+#
+# Spelled-out units are anchored to a preceding digit so an ordinary word is
+# never rewritten: "6 feet" -> "6 ft", but "Foot Massager" is left alone.
 _UNIT_RULES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bcu\.?\s*ft\.?\b"), "cu ft"),
-    (re.compile(r"(?<=\d)\s*['′]"), " in"),  # digit + ' -> inches
-    (re.compile(r'(?<=\d)\s*["″]'), " in"),  # digit + " -> inches
-    (re.compile(r"\bin\.\b|\binches?\b"), "in"),
-    (re.compile(r"\boz\.\b"), "oz"),
-    (re.compile(r"\blbs?\.\b|\bpounds?\b"), "lb"),
+    # `ft\b\.?`, not `ft\.?\b` -- the boundary is checked after the letters,
+    # so the optional period is consumed instead of being left stranded as
+    # "cu ft.".
+    (re.compile(r"\bcu\.?\s*ft\b\.?"), "cu ft"),
+    # ' is the foot mark and " is the inch mark. A listing that writes 24'
+    # for a 24-inch TV is a source typo, not a convention worth encoding --
+    # cables and wire, which really are sold by the foot, are the commoner
+    # use of ' in this catalog. The lookahead protects possessives: without
+    # it "1980's" folds to "1980 ft s". " has no possessive collision, and
+    # 5"W (5 inches wide) is a real spelling, so that rule takes none.
+    (re.compile(r"(?<=\d)\s*['′](?![A-Za-z])"), " ft"),
+    (re.compile(r'(?<=\d)\s*["″]'), " in"),
+    (re.compile(r"\bin\.(?=\s|$)"), "in"),
+    (re.compile(r"(?<=\d)\s*(?:inches|inch)\b"), " in"),
+    (re.compile(r"\bft\.(?=\s|$)"), "ft"),
+    (re.compile(r"(?<=\d)\s*(?:feet|foot)\b"), " ft"),
+    (re.compile(r"\boz\.(?=\s|$)"), "oz"),
+    (re.compile(r"(?<=\d)\s*(?:ounces|ounce)\b"), " oz"),
+    (re.compile(r"\blbs?\.(?=\s|$)"), "lb"),
+    (re.compile(r"(?<=\d)\s*(?:lbs|pounds|pound)\b"), " lb"),
 ]
 
 
@@ -104,9 +127,42 @@ def _normalize_brand(folded_brand: str) -> str:
 _MODEL_TOKEN_RE = re.compile(r"^[A-Za-z0-9-]+$")
 _TRAILING_PUNCT_RE = re.compile(r"[,./=]+$")
 
+# A spec is not a model number. "1200W", "12MP" and "500GB" all pass the
+# digit-and-letter shape test above, but they describe the product instead of
+# identifying it. model_number is the highest-weight blocking key, so a spec
+# admitted here puts every 1200-watt product from every brand in one block --
+# a false key is much more expensive than a missing one.
+#
+# Matched as <digits><suffix> against a curated list. The list is deliberately
+# conservative, since a suffix that collides with a real vendor code costs
+# recall on the strongest signal there is: "wh" is excluded (Bose 161WH is a
+# model, not 161 watt-hours) and so is "a" (HP Officejet 8500A/6500A).
+# Single-letter suffixes only matter above the 4-character floor anyway, so
+# "12V", "55W" and "4K" never reach this check.
+_SPEC_UNIT_SUFFIXES = frozenset(
+    {
+        "w", "kw", "v", "ma", "mah", "ah",
+        "mp", "kb", "mb", "gb", "tb",
+        "hz", "khz", "mhz", "ghz",
+        "mm", "cm", "m", "in", "ft", "yd",
+        "g", "kg", "oz", "lb", "lbs",
+        "ml", "l", "qt", "gal",
+        "p", "k", "fps", "dpi", "ppi", "rpm", "btu", "hp",
+        "pk", "ct", "pc",
+    }
+)
+# No decimal branch: _MODEL_TOKEN_RE already rejects any token containing ".",
+# so a spec is only ever reached here in its digits-then-letters form.
+_SPEC_TOKEN_RE = re.compile(r"^\d+([A-Za-z]+)$")
+
 
 def _clean_token(token: str) -> str:
     return _TRAILING_PUNCT_RE.sub("", token)
+
+
+def _is_spec_token(token: str) -> bool:
+    match = _SPEC_TOKEN_RE.match(token)
+    return match is not None and match.group(1).lower() in _SPEC_UNIT_SUFFIXES
 
 
 def _qualifies_as_model_number(token: str) -> bool:
@@ -114,7 +170,9 @@ def _qualifies_as_model_number(token: str) -> bool:
         return False
     if not _MODEL_TOKEN_RE.match(token):
         return False
-    return any(c.isdigit() for c in token) and any(c.isalpha() for c in token)
+    if not (any(c.isdigit() for c in token) and any(c.isalpha() for c in token)):
+        return False
+    return not _is_spec_token(token)
 
 
 def _extract_model_number(title: str) -> str | None:
@@ -133,10 +191,17 @@ def _extract_model_number(title: str) -> str | None:
     if not tokens:
         return None
 
-    # (a) trailing convention: the last token is the code in every real
-    # example seen where " - " precedes it.
-    if " - " in title and _qualifies_as_model_number(tokens[-1]):
-        return tokens[-1].upper()
+    # (a) trailing convention. The candidate has to be the token that actually
+    # follows the final " - ", not merely the last token of a title that has a
+    # " - " somewhere earlier: "Canon PowerShot Camera - 12MP Black" satisfies
+    # the looser test, and the value it yields is a spec, not a code.
+    head_and_tail = title.rsplit(" - ", 1)
+    if len(head_and_tail) == 2:
+        trailing = head_and_tail[1].split()
+        if len(trailing) == 1:
+            candidate = _clean_token(trailing[0])
+            if _qualifies_as_model_number(candidate):
+                return candidate.upper()
 
     # (b) leading convention.
     if _qualifies_as_model_number(tokens[0]):
