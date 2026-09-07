@@ -4,10 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Pre-implementation. Package skeleton exists (`pyproject.toml`, empty `src/dedup/` subpackages
-matching Layout below) — no pipeline logic is implemented yet. `schema.py` is next.
+Two stages implemented, both with tests (`pytest` → 24 passing):
+
+- **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
+  hatch for unmapped source columns). Committed.
+- **`normalize.py`** — `_fold` (NFKD + casefold + whitespace), unit-spelling and brand-alias
+  canonicalization, model-number extraction, and the `NormalizedRecord` type (composition:
+  `raw: Record` + derived fields).
+
+Everything from `blocking/` onward is still empty scaffolding, and `data/raw/` holds no datasets.
+The next work is a **dataset loader** (raw CSV → `Record`) plus the TF-IDF baseline below —
+blocking cannot be evaluated on pair completeness until there is loaded data with ground truth.
+
 Commands in this file describe the intended contract — verify a command exists before relying on it,
 and update this file as each phase lands.
+
+### Known issues (open)
+
+A code review found real defects in `normalize.py` that are **not yet fixed** — its output is not
+yet trustworthy. In brief: three of the six unit regexes are dead (a trailing `\b` after `\.` can
+never match before a space), the `cu ft` rule leaves a stray period, the apostrophe rule maps the
+*foot* mark to inches (and mangles possessives), and model-number extraction's trailing-delimiter
+branch checks for `" - "` but then takes the last token unconditionally — so specs like `1200W` and
+`12MP` are returned as model numbers, which would become high-weight false blocking keys.
+`schema.py` separately accepts NaN/`inf` prices, whitespace-only `title`/`record_id`, and silently
+ignores unknown field names (`extra="ignore"`), all of which matter once a CSV loader exists.
 
 ## What this is
 
@@ -111,18 +132,28 @@ later stage is justified against it.
 
 ## Commands
 
-To be filled in as phases land. Intended contract:
+The dev environment is `.venv` (deliberately Python 3.12, not the machine default — ML wheel
+availability). On Windows, prefix with `.venv/Scripts/python -m` if the venv is not active.
+
+These work today:
 
 ```bash
 # environment
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all
+pytest                                  # all (24 passing)
 pytest tests/test_normalize.py          # one file
-pytest tests/test_normalize.py::test_model_number_extraction   # one test
-pytest -k blocking                      # by keyword
+pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
+pytest -k model_number                  # by keyword
 
+# lint (line-length 100, target py310)
+ruff check src tests
+```
+
+Not built yet — intended contract, will fail if invoked:
+
+```bash
 # pipeline stages
 python -m dedup.blocking.evaluate       # emits the blocker x completeness x reduction table
 python -m dedup.model.train
