@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Three stages implemented, all with tests (`pytest` → 71 passing):
+Four stages implemented, each with its own tests (`pytest` → 118 passing). One later addition is not
+covered — it is called out under the list, not folded into it:
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -14,20 +15,48 @@ Three stages implemented, all with tests (`pytest` → 71 passing):
 - **`data/abt_buy.py`** — Abt-Buy loader: both sides → `Record`, ground-truth pairs → `entity_id`
   by union-find. Tested against committed fixtures, plus one integration test that runs only when
   the benchmark has been downloaded.
+- **`eval/`** — `metrics.py` (PR curve, PR-AUC, precision@k, threshold evaluation — all taking
+  `n_positives_total` so a pruned candidate set cannot flatter recall), `splits.py` (entity-grouped
+  splitting, `count_true_pairs`), and `baseline.py` (the TF-IDF baseline; see **Baseline to beat**).
+  Result committed at `reports/baseline_tfidf.md`.
 
-Everything from `blocking/` onward is still empty scaffolding. The next work is the **TF-IDF
-baseline** below — there is now loaded data with ground truth, so blocking can finally be
-evaluated on pair completeness after that.
+Implemented but **untested**: `data/__init__.py`'s `DATASETS` registry and `load_dataset()`, which
+let a CLI resolve a benchmark by name so no later stage has to import a loader module. Its two error
+paths — unknown dataset name, and a dataset directory that does not exist because `data/` is
+gitignored — were checked by hand and never pinned by a test. Nothing under `tests/` imports it;
+`test_data_abt_buy.py` still calls `dedup.data.abt_buy` directly, so the registry is exercised only
+through `python -m dedup.eval.baseline`.
+
+The remaining directories — `blocking/`, `features/`, `model/`, `cluster/`, `synth/`, `service/` —
+are all still bare `__init__.py` scaffolding with no modules in them.
+
+Next is **`blocking/`**, and it is the only stage that can move: `features/` needs candidate pairs to
+build vectors from, `model/` needs those vectors, and `cluster/` needs scored pairs from the model,
+so each is blocked on the one before it. Blocking is unblocked because everything it consumes now
+exists — loaded records with ground-truth `entity_id`, `normalize()`, the entity-grouped split, and
+metrics that already refuse to let pruning flatter recall — so a blocker can be scored on pair
+completeness and reduction ratio from its first commit, against the baseline's full-N² recall
+ceiling of 1.0000 as the reference it is trading away.
 
 Commands in this file describe the intended contract — verify a command exists before relying on it,
 and update this file as each phase lands.
 
 ### Open questions
 
-The code-review defects in `normalize.py` and `schema.py` are fixed, each pinned by a regression
-test naming the failure mode. One judgment call in those fixes is worth revisiting against more
-data rather than treating as settled:
+Defects found so far in `normalize.py`, `schema.py` and `eval/metrics.py` are fixed, each pinned by
+a regression test naming the failure mode. These judgment calls are deliberately left open, to be
+settled against more data rather than treated as decided:
 
+- **Evaluation uses the deduplication framing, not record linkage, and that costs comparability.**
+  The baseline scores every pair of the combined catalog and calls a pair positive when the two
+  records share an `entity_id` — so same-side pairs are candidates, and Abt-Buy has 1118 true pairs
+  rather than the 1097 its mapping file ships. Published Abt-Buy figures instead score Abt rows
+  against Buy rows only. The dedup framing is the right one for what this service actually does
+  (CLAUDE.md's opening question is "given a catalog of N records", not "given two catalogs"), and it
+  is what keeps every stage free of a per-source branch. But it means our numbers are near, not
+  equal, to the literature's. Revisit when Amazon-Google lands: it has the same two-sided shape, so
+  if the gap matters for comparison, the fix is a second reported number computed in `eval/`, never
+  a side-aware branch in `blocking/` or `features/`.
 - **The spec-suffix list in `_SPEC_UNIT_SUFFIXES` is conservative on purpose.** It rejects `1200W`
   and `12MP` as model numbers while deliberately omitting `wh` and `a`, which collide with real
   vendor codes (Bose 161WH, HP Officejet 8500A). A false model number fuses unrelated products into
@@ -35,6 +64,16 @@ data rather than treating as settled:
 
 Settled by measurement, recorded so it is not re-litigated:
 
+- **The baseline compares normalized title only; adding description makes it worse.** Measured on
+  Abt-Buy: title alone gives test F1 0.5204 / PR-AUC 0.4720, title + description gives 0.4349 /
+  0.2898 — and P@10 collapses from 0.600 to 0.000, so the very top of the ranking is what breaks.
+  The cause is a measured length asymmetry, not prose quality: Abt descriptions average 249
+  characters and are never empty, Buy's average 34 (median 14) and are empty on 40% of rows. So
+  concatenation makes an Abt vector that is mostly description face a Buy vector that is mostly
+  title, diluting exactly the true pairs it was meant to help. What the two sides do share is
+  category vocabulary — `finish` appears in 759 descriptions, `black` in 622, `digital` in 386 —
+  which lifts *unrelated* pairs instead. Description is not worthless; it belongs in `features/`
+  as its own signal with a missingness indicator, not glued onto the title string.
 - **`'` folds to inches, not feet.** Typographically `'` is the foot mark, and an earlier pass
   changed it on that basis. Measuring the actual CSVs overturned it: all 249 digit+`'` occurrences
   across `Abt.csv` and `Buy.csv` are screen and driver sizes (`3.0' LCD Display`, `32' to 50' LCD`,
@@ -112,6 +151,8 @@ src/dedup/
   schema.py       canonical record model — all datasets normalize into this, keeping later stages dataset-agnostic
   normalize.py    shared by batch and serve paths
   data/           dataset loaders, one module per benchmark — raw CSV to Record, ground truth to entity_id
+                  __init__.py holds DATASETS, the name -> loader registry
+  eval/           metrics (PR-AUC, precision@k), entity-grouped splits, the TF-IDF baseline
   blocking/       standard, sorted_neighborhood, lsh, ann, union
   features/       string, numeric, semantic, missingness
   model/          train, calibrate, threshold (cost model)
@@ -119,7 +160,19 @@ src/dedup/
   synth/          corruption engine for synthetic scale-up
   service/        FastAPI app, HNSW + inverted index, review queue
 reports/          blocking table, PR curves, cost curves — the defensible results
+  baseline_tfidf.md   the TF-IDF number every later stage is measured against
 ```
+
+`eval/metrics.py` is where the metric invariants below are actually enforced, so a new stage should
+import from it rather than calling sklearn directly — `sklearn.metrics.precision_recall_curve`
+divides recall by the positives it can see, which is wrong for every post-blocking candidate set.
+
+The same trap has a second mouth, and `blocking/` will meet both: **any metric whose denominator is
+the surviving candidate count rewards discarding candidates.** `precision_at_k` therefore divides by
+the requested k, never by how many pairs are left — an audit caught it doing the latter, which let a
+floor that discarded 98% of pairs report P@100 = 0.611 for the same 11 hits that score 0.11
+unpruned. Pair completeness and reduction ratio must always be reported together for the same
+reason: either number alone is trivially gamed by moving the threshold.
 
 ## Stack choices with a reason
 
@@ -174,8 +227,23 @@ reports/          blocking table, PR curves, cost curves — the defensible resu
 
 ## Baseline to beat
 
-TF-IDF char-3gram cosine with a single threshold. Record its F1 before building anything else; every
-later stage is justified against it.
+TF-IDF char-3gram cosine with a single threshold — built, measured, and committed at
+`reports/baseline_tfidf.md`. **Abt-Buy, normalized title only: test F1 0.5204** (P 0.4605,
+R 0.5982, PR-AUC 0.4720), entity-grouped split at `test_fraction=0.3, seed=0`. Every later stage is
+justified against that number.
+
+Protocol, so a later comparison is like-for-like:
+
+- Vectorizer fit on the **train** split only, threshold chosen on the **train** split only, both
+  spent on test. Fitting IDF on the full catalog scores better and is a quiet leak.
+- Recall is divided by all true pairs in the split, not by the ones that survived into the
+  candidate set.
+- Scoring is the full N² upper triangle — no blocking, so no recall ceiling above the similarity
+  function. That is what makes it the right reference for `blocking/`.
+- This is the **deduplication** framing: all 2173 records, a pair is positive when the two records
+  share an `entity_id`. That makes 1118 true pairs, not the 1097 the mapping file ships (the 21
+  size-3 clusters each imply a third pair), and same-side pairs are candidates. Published Abt-Buy
+  figures are for the cross-source task, so they are close but not directly comparable.
 
 ## Commands
 
@@ -189,7 +257,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (71 passing)
+pytest                                  # all (118 passing)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -198,12 +266,18 @@ pytest -k model_number                  # by keyword
 ruff check src tests
 
 # load the benchmark (see Data above for the download)
-python -c "from dedup.data.abt_buy import load_abt_buy; print(len(load_abt_buy('data/raw/abt-buy')))"
+python -c "from dedup.data import load_dataset; print(len(load_dataset('abt-buy')))"
+
+# the TF-IDF baseline: prints the report, --out also writes it
+python -m dedup.eval.baseline --dataset abt-buy --out reports/baseline_tfidf.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-The single test that reads `data/raw/` skips when the benchmark has not been downloaded, so a green
-run does *not* by itself mean the real files were checked — `pytest -rs` reports the skip.
+Two tests read `data/raw/` and skip when the benchmark has not been downloaded — the loader's
+integration test in `tests/test_data_abt_buy.py` and the one in `tests/test_eval_baseline.py` that
+re-derives the published baseline F1. So a green run does *not* by itself mean the real files were
+checked, and in particular does not mean the baseline number was reproduced — `pytest -rs` reports
+the skips.
 
 If `tests/fixtures/abt-buy/` ever needs a new shape, regenerate it rather than hand-editing:
 `Abt.csv` must stay cp1252-encoded on disk, which an editor will silently undo.
@@ -241,7 +315,7 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`. Reserved for modules not yet built: `features`, `model`, `eval`, `cluster`, `service`,
+`blocking`, `eval`. Reserved for modules not yet built: `features`, `model`, `cluster`, `service`,
 `data-gen`. A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:
