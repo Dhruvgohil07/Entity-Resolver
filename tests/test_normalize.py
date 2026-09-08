@@ -209,3 +209,84 @@ def test_vendor_codes_colliding_with_unit_suffixes_still_qualify():
     hp = Record(record_id="abt_buy:10", source="abt_buy", title="HP Officejet Pro 8500A Printer")
     assert normalize(bose).model_number == "161WH"
     assert normalize(hp).model_number == "8500A"
+
+
+# ---------------------------------------------------------------------------
+# model_number_key -- the blocking form of a vendor code
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_code_in_two_house_styles_shares_one_key():
+    # The finding that motivated this field. Abt writes KXTS208W, Buy writes
+    # KX-TS208W, and it is the same Panasonic phone. As printed vendor codes
+    # both are correct, so model_number keeps them apart; as blocking keys
+    # they must agree, and an exact model_number blocker reaches pair
+    # completeness 0.3354 against 0.5349 for this form.
+    abt = Record(record_id="abt_buy:abt:1", source="abt_buy", title="Panasonic Phone - KXTS208W")
+    buy = Record(record_id="abt_buy:buy:1", source="abt_buy", title="Panasonic KX-TS208W Corded")
+
+    assert normalize(abt).model_number != normalize(buy).model_number
+    assert normalize(abt).model_number_key == normalize(buy).model_number_key == "kxts208w"
+
+
+def test_the_printed_vendor_code_is_preserved_alongside_the_key():
+    # Two fields rather than one: a human working the review queue needs the
+    # code as the source printed it, not the comparison form.
+    record = Record(record_id="abt_buy:2", source="abt_buy", title="Panasonic Fax - KX-FA83")
+    normalized = normalize(record)
+
+    assert normalized.model_number == "KX-FA83"
+    assert normalized.model_number_key == "kxfa83"
+
+
+def test_code_key_is_the_one_rule_blocking_and_normalize_share():
+    # blocking/standard.py once carried its own copy of this, built on
+    # str.lower rather than casefold. Two implementations that must agree is
+    # how train/serve skew starts: a serve-time inverted index built from the
+    # second copy cannot reproduce the batch blocking key.
+    from dedup.blocking.standard import code_token_keys
+    from dedup.normalize import code_key
+
+    assert code_key("KX-TS208W") == "kxts208w"
+    assert code_key("PS/LX350H") == "pslx350h"
+
+    record = Record(record_id="abt_buy:4", source="abt_buy", title="Panasonic KX-TS208W Corded")
+    assert code_key(normalize(record).model_number) in set(code_token_keys([normalize(record)])[0])
+
+
+def test_code_key_folds_accents_which_plain_folding_deliberately_does_not():
+    # Documented difference, not an accident of the regex: dropping
+    # everything outside [a-z0-9] also drops the combining marks NFKD leaves
+    # behind. Wanted for a blocking key, where a missed match costs a true
+    # pair and a spurious one costs a cheap comparison -- but `_fold` states
+    # it does not strip accents, so the divergence is asserted here.
+    from dedup.normalize import _fold, code_key
+
+    assert _fold("S8ÜX390") != "s8ux390"
+    assert code_key("S8ÜX390") == "s8ux390"
+
+
+def test_code_key_does_not_depend_on_how_folded_its_input_already_was():
+    # The regression. `code_key` has two callers feeding it differently
+    # prepared strings: the model-number path passes a code taken from the
+    # raw title, blocking/ passes tokens from the already-NFKD'd one. Without
+    # decomposing internally, a precomposed "Ü" is dropped whole ("s8x390")
+    # while a decomposed one keeps its base letter ("s8ux390"), so the same
+    # vendor code keys two ways and the two blockers never meet.
+    import unicodedata
+
+    from dedup.normalize import code_key
+
+    precomposed = "S8ÜX390"
+    decomposed = unicodedata.normalize("NFKD", precomposed)
+    assert precomposed != decomposed, "the two spellings must actually differ"
+
+    assert code_key(precomposed) == code_key(decomposed) == "s8ux390"
+
+
+def test_no_model_number_means_no_key():
+    record = Record(record_id="abt_buy:3", source="abt_buy", title="Cotton Kitchen Towel Set")
+    normalized = normalize(record)
+
+    assert normalized.model_number is None
+    assert normalized.model_number_key is None
