@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Four stages implemented, each with its own tests (`pytest` → 118 passing). One later addition is not
+Five stages implemented, each with its own tests (`pytest` → 186 passing). One later addition is not
 covered — it is called out under the list, not folded into it:
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
@@ -19,24 +19,37 @@ covered — it is called out under the list, not folded into it:
   `n_positives_total` so a pruned candidate set cannot flatter recall), `splits.py` (entity-grouped
   splitting, `count_true_pairs`), and `baseline.py` (the TF-IDF baseline; see **Baseline to beat**).
   Result committed at `reports/baseline_tfidf.md`.
+- **`blocking/`** — eight modules, every one directly covered by tests: four blocker families
+  (`standard` exact keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them
+  and computes pair completeness / reduction ratio), `pairs.py` (the packed-int64 representation),
+  `base.py` (the `Blocker` contract), and `evaluate.py` (the CLI). Union pair completeness
+  **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
+  Result committed at `reports/blocking.md`.
 
 Implemented but **untested**: `data/__init__.py`'s `DATASETS` registry and `load_dataset()`, which
 let a CLI resolve a benchmark by name so no later stage has to import a loader module. Its two error
 paths — unknown dataset name, and a dataset directory that does not exist because `data/` is
-gitignored — were checked by hand and never pinned by a test. Nothing under `tests/` imports it;
-`test_data_abt_buy.py` still calls `dedup.data.abt_buy` directly, so the registry is exercised only
-through `python -m dedup.eval.baseline`.
+gitignored — were checked by hand and never pinned by a test. Nothing under `tests/` imports it:
+`test_data_abt_buy.py` and `test_blocking_evaluate.py` both call `dedup.data.abt_buy` directly, so
+the registry is exercised only by the two CLIs (`dedup.eval.baseline`, `dedup.blocking.evaluate`)
+and would not fail a test run if it broke.
 
-The remaining directories — `blocking/`, `features/`, `model/`, `cluster/`, `synth/`, `service/` —
-are all still bare `__init__.py` scaffolding with no modules in them.
+The remaining directories — `features/`, `model/`, `cluster/`, `synth/`, `service/` — are all still
+bare `__init__.py` scaffolding with no modules in them.
 
-Next is **`blocking/`**, and it is the only stage that can move: `features/` needs candidate pairs to
-build vectors from, `model/` needs those vectors, and `cluster/` needs scored pairs from the model,
-so each is blocked on the one before it. Blocking is unblocked because everything it consumes now
-exists — loaded records with ground-truth `entity_id`, `normalize()`, the entity-grouped split, and
-metrics that already refuse to let pruning flatter recall — so a blocker can be scored on pair
-completeness and reduction ratio from its first commit, against the baseline's full-N² recall
-ceiling of 1.0000 as the reference it is trading away.
+Next is **`features/`**, and it is now the only stage that can move: `model/` needs its vectors and
+`cluster/` needs scored pairs from the model, so each is blocked on the one before it. `features/`
+is unblocked because `blocking/` now emits candidate pairs for it to build vectors from — 84,117 of
+them on Abt-Buy, carrying 0.9928 of all true pairs. That number is a **ceiling, not a score**: the
+8 true pairs no blocker emitted are unrecoverable, so system recall cannot exceed it however good
+the classifier becomes.
+
+Two caveats on that 0.9928, both measured. It is a **full-catalog** figure; on the entity-grouped
+split the union reaches 0.9949 on train and 1.0000 on test, and the test number is the ceiling that
+actually binds when `features/` and `model/` are compared against the baseline's test-split F1
+0.5204. And the blocker parameters were **swept over the same catalog they are scored on**, so it is
+a best-of-sweep number, not a clean estimate — small bias here, but unquantified until parameters
+are selected on train alone.
 
 Commands in this file describe the intended contract — verify a command exists before relying on it,
 and update this file as each phase lands.
@@ -64,6 +77,54 @@ settled against more data rather than treated as decided:
 
 Settled by measurement, recorded so it is not re-litigated:
 
+- **Model-number blocking keys strip separators; the printed code is kept alongside.**
+  `normalize.py` grew `model_number_key` next to `model_number` because Abt writes `KXTS208W` and
+  Buy writes `KX-TS208W` for the same Panasonic phone. Both are correct as printed vendor codes, so
+  neither field wins: `model_number` stays as the source wrote it for the review queue, and the
+  stripped form is what blocks. Worth pair completeness 0.3354 → 0.5349 — about a fifth of
+  achievable recall on the strongest key there is, previously lost to punctuation. The rule is
+  `normalize.code_key`, public and shared: `blocking/standard.py` briefly carried its own copy built
+  on `str.lower`, and two implementations that must agree is how train/serve skew starts. It
+  decomposes NFKD internally rather than trusting the caller, because its callers disagree — the
+  model-number path passes a code taken from the raw title, blocking passes tokens from the folded
+  one, and without that a precomposed `Ü` is dropped whole while a decomposed one keeps its base
+  letter, keying the same code two ways.
+- **Three of the six blockers add no completeness the others do not already have.** Leave-one-out
+  marginals against the committed six-blocker union, measured, not estimated:
+
+  | blocker | marginal candidates | marginal PC |
+  | --- | ---: | ---: |
+  | `standard (model number)` | +0 | +0.0000 |
+  | `standard (code tokens)` | +737 | +0.0000 |
+  | `standard (rare tokens)` | +15,244 | +0.0089 |
+  | `sorted_neighborhood` | +28,474 | +0.0045 |
+  | `lsh (minhash)` | +18,317 | +0.0000 |
+  | `ann (faiss HNSW)` | +2,345 | +0.0215 |
+
+  The model-number blocker is *entirely* subsumed — every pair it finds, something else finds too,
+  which follows from `code_token_keys` indexing every code-shaped token while extraction commits to
+  one. LSH earns nothing for 18,317 candidates; `sorted_neighborhood` buys 0.0045 for 28,474.
+  Only `ann`, `rare tokens` and `sorted_neighborhood` move the ceiling at all.
+
+  None are deleted. A negative result someone can re-run is evidence; the same claim asserted from
+  a deleted experiment is not, and all three are configuration- and dataset-specific. LSH in
+  particular was measured with *token* shingles on six-to-ten-token titles, which is close to the
+  worst case for Jaccard — `shingles="char"` and `synth/`'s token-drop corruption are both untested
+  against it. Re-check every row of this table on `synth/` before dropping anything.
+- **`ann` is the load-bearing blocker.** faiss HNSW over char-3gram TF-IDF reaches PC 0.9562 alone,
+  beating every exact-key blocker combined, because it needs no shared token at all — it is what
+  catches `Bose 161WH` against `Boss 161 Speaker`, a source typo in the brand. Its index is built
+  **single-threaded on purpose**: parallel HNSW construction gave 14,608 / 14,603 / 14,602
+  candidates across three runs of identical input, and a committed report whose numbers drift is not
+  reproducible.
+- **What blocking still misses is a different identifier system, not a near-miss.** Of 1,118 true
+  pairs, 8 survive nothing. They are two failure modes, and neither is fixable by tuning a window or
+  a threshold: (a) vendor SKU against distributor part number — `Canon Color Ink Tank - CL41CL` vs
+  `Canon Ink Cartridge For PIXMA iP1600 ... - 0617B002`, two disjoint numbering schemes for one
+  product; and (b) a truncated marketplace title carrying no code at all — `LG Over-The-Range White
+  Microwave Oven - LMV1680WH` vs `LG 1.6 cu.ft. Over the Range`. Closing (a) needs a
+  manufacturer-part-number cross-reference, which is data this project does not have; closing (b)
+  needs the description, which `features/` will have and blocking does not.
 - **The baseline compares normalized title only; adding description makes it worse.** Measured on
   Abt-Buy: title alone gives test F1 0.5204 / PR-AUC 0.4720, title + description gives 0.4349 /
   0.2898 — and P@10 collapses from 0.600 to 0.000, so the very top of the ranking is what breaks.
@@ -153,7 +214,9 @@ src/dedup/
   data/           dataset loaders, one module per benchmark — raw CSV to Record, ground truth to entity_id
                   __init__.py holds DATASETS, the name -> loader registry
   eval/           metrics (PR-AUC, precision@k), entity-grouped splits, the TF-IDF baseline
-  blocking/       standard, sorted_neighborhood, lsh, ann, union
+  blocking/       standard, sorted_neighborhood, lsh, ann, union + evaluate
+                  pairs.py packs candidate pairs as int64 i*n+j — 8 bytes each, so the same
+                  code survives the jump to synth/ scale; base.py holds the Blocker contract
   features/       string, numeric, semantic, missingness
   model/          train, calibrate, threshold (cost model)
   cluster/        components, correlation, agglomerative, bcubed
@@ -161,6 +224,7 @@ src/dedup/
   service/        FastAPI app, HNSW + inverted index, review queue
 reports/          blocking table, PR curves, cost curves — the defensible results
   baseline_tfidf.md   the TF-IDF number every later stage is measured against
+  blocking.md         blocker x completeness x reduction; the union row is the recall ceiling
 ```
 
 `eval/metrics.py` is where the metric invariants below are actually enforced, so a new stage should
@@ -257,7 +321,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (118 passing)
+pytest                                  # all (186 passing)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -270,14 +334,18 @@ python -c "from dedup.data import load_dataset; print(len(load_dataset('abt-buy'
 
 # the TF-IDF baseline: prints the report, --out also writes it
 python -m dedup.eval.baseline --dataset abt-buy --out reports/baseline_tfidf.md
+
+# the blocking table: blocker x pair completeness x reduction ratio
+python -m dedup.blocking.evaluate --dataset abt-buy --out reports/blocking.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Two tests read `data/raw/` and skip when the benchmark has not been downloaded — the loader's
-integration test in `tests/test_data_abt_buy.py` and the one in `tests/test_eval_baseline.py` that
-re-derives the published baseline F1. So a green run does *not* by itself mean the real files were
-checked, and in particular does not mean the baseline number was reproduced — `pytest -rs` reports
-the skips.
+Three tests read `data/raw/` and skip when the benchmark has not been downloaded — the loader's
+integration test in `tests/test_data_abt_buy.py`, the one in `tests/test_eval_baseline.py` that
+re-derives the published baseline F1, and the one in `tests/test_blocking_evaluate.py` that
+re-derives the published union pair completeness. So a green run does *not* by itself mean the real
+files were checked, and in particular does not mean either published number was reproduced —
+`pytest -rs` reports the skips.
 
 If `tests/fixtures/abt-buy/` ever needs a new shape, regenerate it rather than hand-editing:
 `Abt.csv` must stay cp1252-encoded on disk, which an editor will silently undo.
@@ -290,7 +358,6 @@ Not built yet — intended contract, will fail if invoked:
 
 ```bash
 # pipeline stages
-python -m dedup.blocking.evaluate       # emits the blocker x completeness x reduction table
 python -m dedup.model.train
 python -m dedup.cluster.evaluate
 

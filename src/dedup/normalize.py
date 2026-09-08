@@ -179,6 +179,57 @@ def _qualifies_as_model_number(token: str) -> bool:
     return not _is_spec_token(token)
 
 
+# Separators are the difference between "KXTS208W" (Abt) and "KX-TS208W" (Buy)
+# -- the same Panasonic phone, written to two house styles. Both are correct as
+# printed vendor codes, so `model_number` keeps whichever the source used; this
+# is the form used to decide whether two codes are *the same code*.
+#
+# Measured, not assumed: on Abt-Buy an exact model_number blocker reaches pair
+# completeness 0.3354, and the same blocker keyed on this stripped form reaches
+# 0.5349. Roughly a fifth of achievable recall on the strongest key there is,
+# lost to punctuation.
+_MODEL_KEY_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def code_key(token: str) -> str:
+    """Comparison form of a vendor code or code-shaped token.
+
+    Public because `blocking/` needs the identical rule for the code-shaped
+    tokens it indexes, and two private copies that must agree is how
+    train/serve skew starts: a serve-time inverted index built from a second
+    implementation cannot reproduce the batch blocking key.
+
+    Note this is deliberately *more* aggressive than `_fold`. Discarding
+    everything outside `[a-z0-9]` also discards the combining marks NFKD
+    leaves behind, so "S8UX390" and "S8ÜX390" collapse to one key -- accent
+    folding that `_fold` explicitly declines to do. That is wanted for a
+    blocking key, where the cost of a missed match is a lost true pair and
+    the cost of an extra one is a cheap comparison. It is stated here because
+    it is a real difference in behaviour between the two functions, not an
+    accident of the regex.
+
+    Decomposes internally rather than assuming the caller already did. Its
+    two callers feed it differently-prepared strings -- `_model_number_key`
+    passes a code extracted from the *raw* title, `blocking` passes tokens
+    from the already-folded one -- and without the NFKD here the same code
+    keys two ways: a precomposed "Ü" is dropped whole ("s8x390") while a
+    decomposed one loses only its mark ("s8ux390"). A key function whose
+    answer depends on how far its input was already normalized is not usable
+    as a shared rule.
+    """
+    decomposed = unicodedata.normalize("NFKD", token).casefold()
+    return _MODEL_KEY_STRIP_RE.sub("", decomposed)
+
+
+def _model_number_key(model_number: str | None) -> str | None:
+    if model_number is None:
+        return None
+    # A code of nothing but punctuation cannot key a block -- `_qualifies_as_
+    # model_number` already requires a letter and a digit, so this is
+    # defensive rather than reachable today.
+    return code_key(model_number) or None
+
+
 def _extract_model_number(title: str) -> str | None:
     """Best-effort vendor-code extraction. Preference order, each grounded
     in a convention actually observed in real titles:
@@ -240,7 +291,17 @@ class NormalizedRecord(BaseModel):
     normalized_title: str
     normalized_description: str | None
     normalized_brand: str | None
+
+    # The vendor code as the source printed it ("KX-TS208W"), for display and
+    # for a human reading the review queue.
     model_number: str | None
+
+    # The same code reduced to a comparison form ("kxts208w"). Two fields
+    # rather than one because they answer different questions, and collapsing
+    # them would throw away the printed form. This one lives here rather than
+    # in blocking/ so that batch and serve compute it identically, and so
+    # features/ can key on it later without importing from a sibling stage.
+    model_number_key: str | None
 
 
 def normalize(record: Record) -> NormalizedRecord:
@@ -267,4 +328,5 @@ def normalize(record: Record) -> NormalizedRecord:
         normalized_description=normalized_description,
         normalized_brand=normalized_brand,
         model_number=model_number,
+        model_number_key=_model_number_key(model_number),
     )
