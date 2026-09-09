@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Five stages implemented, each with its own tests (`pytest` → 186 passing). One later addition is not
-covered — it is called out under the list, not folded into it:
+Six stages implemented (`pytest` → 250 passing, 1 skipped). Two things are **not** covered by
+that run, and both are called out where they belong rather than folded into the count: the
+`semantic.py` carve-out inside the `features/` bullet, and the `data/__init__.py` registry under
+the list.
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -25,28 +27,45 @@ covered — it is called out under the list, not folded into it:
   `base.py` (the `Blocker` contract), and `evaluate.py` (the CLI). Union pair completeness
   **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
   Result committed at `reports/blocking.md`.
+- **`features/`** — seven modules: `base.py` (the `FeatureSpec` / `FeatureMatrix` contract),
+  `string.py`, `numeric.py`, `semantic.py` and `missingness.py` (the blocks), `vectorize.py`
+  (`PairFeaturizer`, fit/transform), and `evaluate.py` (the CLI). **33 columns** (34 with the
+  opt-in semantic block), fit on train and spent on test like the baseline. The missingness
+  invariant is enforced by construction, not by review: every imputed column declares a
+  `companion_indicator` and `validate_registry` rejects the featurizer at build time if one does
+  not resolve. Result committed at `reports/features.md`. One carve-out: `semantic.py`'s
+  `SemanticBlock.fit` and `.transform` are **not exercised on a normal run** — only its `specs`
+  and `model_is_cached` are, because the test that encodes anything is gated on weights that are
+  not downloaded. The block is implemented and its behaviour is unverified here.
 
 Implemented but **untested**: `data/__init__.py`'s `DATASETS` registry and `load_dataset()`, which
 let a CLI resolve a benchmark by name so no later stage has to import a loader module. Its two error
 paths — unknown dataset name, and a dataset directory that does not exist because `data/` is
 gitignored — were checked by hand and never pinned by a test. Nothing under `tests/` imports it:
-`test_data_abt_buy.py` and `test_blocking_evaluate.py` both call `dedup.data.abt_buy` directly, so
-the registry is exercised only by the two CLIs (`dedup.eval.baseline`, `dedup.blocking.evaluate`)
-and would not fail a test run if it broke.
+`test_data_abt_buy.py`, `test_blocking_evaluate.py` and `test_features_evaluate.py` all call
+`dedup.data.abt_buy` directly, so the registry is exercised only by the three CLIs
+(`dedup.eval.baseline`, `dedup.blocking.evaluate`, `dedup.features.evaluate`) and would not fail a
+test run if it broke. Adding `features/` widened the gap rather than closing it: there is now a
+third CLI depending on code no test touches.
 
-The remaining directories — `features/`, `model/`, `cluster/`, `synth/`, `service/` — are all still
-bare `__init__.py` scaffolding with no modules in them.
+The remaining directories — `model/`, `cluster/`, `synth/`, `service/` — are all still bare
+`__init__.py` scaffolding with no modules in them.
 
-Next is **`features/`**, and it is now the only stage that can move: `model/` needs its vectors and
-`cluster/` needs scored pairs from the model, so each is blocked on the one before it. `features/`
-is unblocked because `blocking/` now emits candidate pairs for it to build vectors from — 84,117 of
-them on Abt-Buy, carrying 0.9928 of all true pairs. That number is a **ceiling, not a score**: the
-8 true pairs no blocker emitted are unrecoverable, so system recall cannot exceed it however good
-the classifier becomes.
+Next is **`model/`**, and it is now the only stage that can move: `cluster/` needs scored pairs
+from it, and `service/` needs both. `model/` is unblocked because `features/` now turns a candidate
+pair into a 33-column vector — LightGBM over those, then isotonic or Platt calibration, then the
+two cost-derived thresholds that define the three bands.
 
-Two caveats on that 0.9928, both measured. It is a **full-catalog** figure; on the entity-grouped
-split the union reaches 0.9949 on train and 1.0000 on test, and the test number is the ceiling that
-actually binds when `features/` and `model/` are compared against the baseline's test-split F1
+`model/` is also where the first number comparable to the baseline's **test F1 0.5204** appears.
+Nothing in `reports/features.md` is that number: those are univariate per-column PR-AUCs over the
+*blocked* candidate set, where 91% of pairs have already been discarded, so they are not
+comparable with a figure computed over the full N² triangle. `title_tfidf_cosine` scoring 0.5222
+there against the baseline's 0.4720 PR-AUC measures the candidate set, not the column.
+
+Two caveats on the blocking ceiling of 0.9928, both measured. It is a **full-catalog** figure; on
+the entity-grouped split the union reaches 0.9949 on train and 1.0000 on test — both re-derived by
+`tests/test_features_evaluate.py` — and the test number is the ceiling that actually binds
+when `features/` and `model/` are compared against the baseline's test-split F1
 0.5204. And the blocker parameters were **swept over the same catalog they are scored on**, so it is
 a best-of-sweep number, not a clean estimate — small bias here, but unquantified until parameters
 are selected on train alone.
@@ -141,6 +160,44 @@ Settled by measurement, recorded so it is not re-litigated:
   `4' x 6' Print Paper`, `1-1/8' Dome Tweeter`) and none is a length in feet. Normalize follows the
   source convention, not the typographic one. Revisit only if a source that genuinely sells by the
   foot is added.
+- **The missingness invariant binds the reporting path too, not just the vector.** The first
+  version of `features/evaluate.py` averaged `FILL_VALUE` into its per-column class means, which
+  reads a null as a mismatch — the exact error invariant I5 exists to prevent, committed one
+  layer above the vector where I5 was being checked. It was not a rounding difference. It
+  reported `brand_equal` as pointing *backwards* (0.0176 on true pairs against 0.0890 on false)
+  because the column is covered on 2.3% of positives against 24.3% of negatives — Abt has no
+  brand column, so true pairs are almost all cross-source. On the 4,506 pairs where a brand
+  actually exists it points forwards and strongly: **0.7500 against 0.3655, separation +0.3845**.
+  The same restriction matters for ranking: a fill of 0.0 sorts last for a similarity column but,
+  once negated, sorts *first* for a distance column, ranking an absent price as a perfect price
+  match. Every figure in the report is now computed over covered pairs only, pinned by
+  `test_class_means_ignore_the_fill` and
+  `test_a_distance_columns_fill_is_not_ranked_as_perfect_agreement`.
+  Caught by the `er-invariants` agent, not by the test suite — the suite verified the invariant
+  inside `vectorize.py` and never asked whether the report obeyed it.
+- **One feature column genuinely points the wrong way on Abt-Buy, and it is not a bug.**
+  `desc_len_ratio` reads 0.2213 on true pairs against 0.4763 on false, over 12,133 covered pairs
+  (200 positive) — measured on covered pairs only, so this one survives the correction above.
+  Flipping its sign would be the wrong fix. It is the deduplication framing showing through:
+  same-side pairs (Buy against Buy) are candidates, and Abt descriptions average 249 characters
+  against Buy's 34, so two descriptions of *similar* length are evidence of being same-side,
+  which on this dataset means evidence of being a non-match. A tree model uses that correctly; a
+  human reading the column name does not, which is why `reports/features.md` calls it out. This
+  is also the most concrete cost yet measured for the framing question left open above.
+- **Vendor-code columns dominate the feature ranking, as predicted.** Top five by univariate
+  PR-AUC on test: `code_token_jaccard` 0.6274, `model_number_prefix_ratio` 0.5784,
+  `title_tfidf_cosine` 0.5222, `model_number_exact` 0.4714, `code_best_ratio` 0.4646. A test
+  asserts the code columns stay at the top — if they ever do not, the feature is broken, not the
+  claim. Worth noting `cross_title_desc_cosine_max` reaches 0.4473: the column added for the
+  truncated-title failure reads 0.7056 on the `LMV1680WH` / `1.6 cu.ft.` pair where every string
+  column reads under 0.32.
+- **`price_abs_log_ratio` uses `log1p`, which costs exact scale-freeness at the bottom of the
+  range.** A 2x gap reads 0.647 at $10–$20 against log(2) = 0.693 at $1000–$2000. Accepted
+  rather than worked around: `schema.py` permits a price of 0.0 and `log(0)` is -inf, which would
+  propagate through the whole vector with nothing pointing back at the cause. Abt-Buy's lowest
+  price is $1.75 with two rows under $5, so the distortion is confined to a corner of the range
+  that barely exists, and a tree model splits on thresholds rather than reading the value as a
+  ratio. Pinned by a test so it stays a known property.
 
 ## What this is
 
@@ -217,7 +274,8 @@ src/dedup/
   blocking/       standard, sorted_neighborhood, lsh, ann, union + evaluate
                   pairs.py packs candidate pairs as int64 i*n+j — 8 bytes each, so the same
                   code survives the jump to synth/ scale; base.py holds the Blocker contract
-  features/       string, numeric, semantic, missingness
+  features/       string, numeric, semantic, missingness + base (the FeatureSpec contract),
+                  vectorize (PairFeaturizer: fit on train, transform anywhere) + evaluate
   model/          train, calibrate, threshold (cost model)
   cluster/        components, correlation, agglomerative, bcubed
   synth/          corruption engine for synthetic scale-up
@@ -225,6 +283,8 @@ src/dedup/
 reports/          blocking table, PR curves, cost curves — the defensible results
   baseline_tfidf.md   the TF-IDF number every later stage is measured against
   blocking.md         blocker x completeness x reduction; the union row is the recall ceiling
+  features.md         per-column coverage, PR-AUC and class separation; not comparable to the
+                      baseline's numbers, which are computed over the full N^2 triangle
 ```
 
 `eval/metrics.py` is where the metric invariants below are actually enforced, so a new stage should
@@ -321,7 +381,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (186 passing)
+pytest                                  # all (250 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -337,15 +397,24 @@ python -m dedup.eval.baseline --dataset abt-buy --out reports/baseline_tfidf.md
 
 # the blocking table: blocker x pair completeness x reduction ratio
 python -m dedup.blocking.evaluate --dataset abt-buy --out reports/blocking.md
+
+# per-feature diagnostics: coverage x PR-AUC x class separation
+# --semantic adds the sentence-transformers column (downloads ~90 MB on first use)
+python -m dedup.features.evaluate --dataset abt-buy --out reports/features.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Three tests read `data/raw/` and skip when the benchmark has not been downloaded — the loader's
-integration test in `tests/test_data_abt_buy.py`, the one in `tests/test_eval_baseline.py` that
-re-derives the published baseline F1, and the one in `tests/test_blocking_evaluate.py` that
-re-derives the published union pair completeness. So a green run does *not* by itself mean the real
-files were checked, and in particular does not mean either published number was reproduced —
+Seven tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
+integration test in `tests/test_data_abt_buy.py`, one in `tests/test_eval_baseline.py` that
+re-derives the published baseline F1, one in `tests/test_blocking_evaluate.py` that re-derives the
+published union pair completeness, and four in `tests/test_features_evaluate.py` that re-derive the
+per-split blocking ceiling and the feature ranking. So a green run does *not* by itself mean the
+real files were checked, and in particular does not mean any published number was reproduced —
 `pytest -rs` reports the skips.
+
+An eighth test skips for a different reason and is not about the benchmark: the
+sentence-transformers column is opt-in, and its weights are not downloaded. That is the one skip
+in a normal run.
 
 If `tests/fixtures/abt-buy/` ever needs a new shape, regenerate it rather than hand-editing:
 `Abt.csv` must stay cp1252-encoded on disk, which an editor will silently undo.
@@ -382,7 +451,7 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`, `eval`. Reserved for modules not yet built: `features`, `model`, `cluster`, `service`,
+`blocking`, `eval`, `features`. Reserved for modules not yet built: `model`, `cluster`, `service`,
 `data-gen`. A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:
