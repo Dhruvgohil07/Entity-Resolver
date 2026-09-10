@@ -25,12 +25,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from dedup.blocking.ann import AnnBlocker
 from dedup.blocking.base import Blocker, BlockerRun
-from dedup.blocking.lsh import MinHashLSHBlocker
+from dedup.blocking.defaults import default_blocker_set
 from dedup.blocking.pairs import total_pairs, unpack
-from dedup.blocking.sorted_neighborhood import SortedNeighborhoodBlocker
-from dedup.blocking.standard import default_blockers
 from dedup.blocking.union import (
     BlockerScore,
     ground_truth,
@@ -42,22 +39,6 @@ from dedup.data import DATASETS, load_dataset
 from dedup.normalize import NormalizedRecord, normalize
 
 MISSED_EXAMPLES = 10
-
-
-def default_blocker_set() -> list[Blocker]:
-    """Every blocker, including the ones measurement says do not earn their place.
-
-    `lsh` contributes zero marginal completeness on this benchmark and
-    `sorted_neighborhood` buys 0.0044 for 30k candidates. They stay in the
-    table because a negative result someone can re-run is evidence, and the
-    same result asserted from a deleted experiment is not.
-    """
-    return [
-        *default_blockers(),
-        SortedNeighborhoodBlocker(window=20),
-        MinHashLSHBlocker(threshold=0.4, shingles="token"),
-        AnnBlocker(neighbours=10),
-    ]
 
 
 @dataclass(frozen=True)

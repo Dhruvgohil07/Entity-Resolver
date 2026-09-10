@@ -41,15 +41,14 @@ from pathlib import Path
 
 import numpy as np
 
-from dedup.blocking.base import BlockerRun
-from dedup.blocking.evaluate import default_blocker_set
-from dedup.blocking.union import BlockerScore, ground_truth, score, union_run
+from dedup.blocking.defaults import block_split
+from dedup.blocking.union import BlockerScore
 from dedup.data import DATASETS, load_dataset
 from dedup.eval.metrics import average_precision, precision_recall_curve
 from dedup.eval.splits import count_true_pairs, group_by_entity, split_by_entity
 from dedup.features.base import FeatureSpec
 from dedup.features.vectorize import PairFeaturizer, pair_labels
-from dedup.normalize import NormalizedRecord, normalize
+from dedup.normalize import normalize
 from dedup.schema import Record
 
 # Above this the two columns are near-duplicates. Not an error -- LightGBM is
@@ -117,18 +116,10 @@ class FeatureReport:
     correlated: list[tuple[str, str, float]]
 
 
-def block(records: list[NormalizedRecord]) -> tuple[BlockerRun, BlockerScore]:
-    """Run every blocker over one split and union the result.
-
-    Blocking runs *inside* a split, never across the catalog. Cross-split
-    pairs are all negatives by construction -- the entities were assigned to
-    one side or the other -- so this loses no positives, and it keeps the
-    packed pair indices meaningful as positions in this record list.
-    """
-    runs = [blocker.run(records) for blocker in default_blocker_set()]
-    combined = union_run(runs)
-    truth, n_true = ground_truth(records)
-    return combined, score(combined, truth, len(records), n_true_pairs_total=n_true)
+# Re-exported so `features.evaluate.block` keeps resolving; the runner itself
+# now lives in `blocking/defaults.py`, where `model/` can reach it without
+# importing out of a CLI module.
+block = block_split
 
 
 def diagnose(

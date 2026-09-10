@@ -10,6 +10,7 @@ import pytest
 from dedup.eval.splits import (
     count_true_pairs,
     group_by_entity,
+    kfold_by_entity,
     split_by_entity,
     true_pair_ids,
 )
@@ -146,3 +147,77 @@ def test_group_by_entity_keeps_every_member_together():
     records = make_records([2, 3])
     grouped = group_by_entity(records)
     assert sorted(len(group) for group in grouped.values()) == [2, 3]
+
+
+# ---------------------------------------------------------------------------
+# kfold_by_entity -- the same invariant, applied K ways for out-of-fold
+# calibration in model/. A fold that shared an entity with the folds used to
+# train would make the calibration set optimistic, which is the leak the whole
+# out-of-fold arrangement exists to avoid.
+# ---------------------------------------------------------------------------
+
+
+def test_no_entity_spans_two_folds():
+    folds = kfold_by_entity(make_records([2] * 30), n_folds=5, seed=0)
+    seen: dict[str, int] = {}
+    for index, fold in enumerate(folds):
+        for record in fold:
+            assert seen.setdefault(record.entity_id, index) == index
+
+
+def test_the_folds_partition_the_catalog_exactly():
+    records = make_records([2, 3, 1] * 10)
+    folds = kfold_by_entity(records, n_folds=5, seed=0)
+
+    ids = [record.record_id for fold in folds for record in fold]
+    assert len(ids) == len(records)
+    assert set(ids) == {record.record_id for record in records}
+
+
+def test_every_fold_holds_at_least_one_entity():
+    folds = kfold_by_entity(make_records([2] * 7), n_folds=5, seed=0)
+    assert len(folds) == 5
+    assert all(fold for fold in folds)
+
+
+def test_folds_depend_only_on_the_seed_not_on_row_order():
+    records = make_records([2, 3] * 12)
+    shuffled = list(reversed(records))
+
+    def signature(folds):
+        return [sorted(record.record_id for record in fold) for fold in folds]
+
+    assert signature(kfold_by_entity(records, seed=7)) == signature(
+        kfold_by_entity(shuffled, seed=7)
+    )
+
+
+def test_a_different_seed_gives_a_different_partition():
+    records = make_records([2] * 30)
+
+    def signature(folds):
+        return [sorted(record.record_id for record in fold) for fold in folds]
+
+    assert signature(kfold_by_entity(records, seed=0)) != signature(
+        kfold_by_entity(records, seed=1)
+    )
+
+
+def test_more_folds_than_entities_is_an_error():
+    with pytest.raises(ValueError, match="every fold must hold at least one entity"):
+        kfold_by_entity(make_records([2] * 3), n_folds=5)
+
+
+@pytest.mark.parametrize("n_folds", [0, 1, -2])
+def test_fewer_than_two_folds_is_an_error(n_folds):
+    with pytest.raises(ValueError, match="n_folds must be at least 2"):
+        kfold_by_entity(make_records([2] * 10), n_folds=n_folds)
+
+
+def test_an_unlabeled_record_is_rejected_here_too():
+    records = make_records([2] * 10)
+    records.append(
+        Record(record_id="synthetic:new", source="synthetic", title="a record with no entity")
+    )
+    with pytest.raises(ValueError, match="no entity_id"):
+        kfold_by_entity(records)

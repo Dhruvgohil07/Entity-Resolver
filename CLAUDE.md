@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Six stages implemented (`pytest` → 250 passing, 1 skipped). Two things are **not** covered by
-that run, and both are called out where they belong rather than folded into the count: the
-`semantic.py` carve-out inside the `features/` bullet, and the `data/__init__.py` registry under
-the list.
+Seven stages implemented (`pytest` → 346 passing, 1 skipped; 94% line coverage). Two things are
+**not** covered by that run, and both are called out where they belong rather than folded into the
+count: the `semantic.py` carve-out inside the `features/` bullet, and the four CLI entry points
+under the list.
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -19,12 +19,16 @@ the list.
   the benchmark has been downloaded.
 - **`eval/`** — `metrics.py` (PR curve, PR-AUC, precision@k, threshold evaluation — all taking
   `n_positives_total` so a pruned candidate set cannot flatter recall), `splits.py` (entity-grouped
-  splitting, `count_true_pairs`), and `baseline.py` (the TF-IDF baseline; see **Baseline to beat**).
-  Result committed at `reports/baseline_tfidf.md`.
-- **`blocking/`** — eight modules, every one directly covered by tests: four blocker families
-  (`standard` exact keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them
-  and computes pair completeness / reduction ratio), `pairs.py` (the packed-int64 representation),
-  `base.py` (the `Blocker` contract), and `evaluate.py` (the CLI). Union pair completeness
+  train/test splitting, `kfold_by_entity` for out-of-fold calibration, `count_true_pairs`), and
+  `baseline.py` (the TF-IDF baseline; see **Baseline to beat**). Result committed at
+  `reports/baseline_tfidf.md`.
+- **`blocking/`** — nine modules, all exercised by tests: four blocker families (`standard` exact
+  keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them and computes pair
+  completeness / reduction ratio), `pairs.py` (the packed-int64 representation), `base.py` (the
+  `Blocker` contract), `defaults.py` (the shared blocker set and `block_split`, the runner every
+  later stage uses) and `evaluate.py` (the CLI). No test imports `defaults.py` by name; it is
+  reached, at 100% line coverage, through the names `blocking/evaluate.py` and
+  `features/evaluate.py` re-export and through `model/train.prepare`. Union pair completeness
   **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
   Result committed at `reports/blocking.md`.
 - **`features/`** — seven modules: `base.py` (the `FeatureSpec` / `FeatureMatrix` contract),
@@ -37,37 +41,67 @@ the list.
   `SemanticBlock.fit` and `.transform` are **not exercised on a normal run** — only its `specs`
   and `model_is_cached` are, because the test that encodes anything is gated on weights that are
   not downloaded. The block is implemented and its behaviour is unverified here.
+- **`model/`** — four modules: `threshold.py` (the `CostModel` and the three bands), `train.py`
+  (`PairScorer` — featurizer, booster and calibrator as one servable artifact — plus `prepare`,
+  the normalize/block/label glue), `calibrate.py` (Platt, fit out of fold) and `evaluate.py` (the
+  CLI). **Test F1 0.8934** against the baseline's 0.5204, PR-AUC 0.9567, at a threshold chosen on
+  train and spent on test. The cost model's default 20 : 2 : 1 auto-merges 280 test pairs at
+  precision 0.9750, queues 13 for review and loses 56 outright. Result committed at
+  `reports/model.md`. Three things are enforced rather than reviewed: `PairScorer.probabilities`
+  refuses to return anything without a calibrator, because LightGBM's raw output is already in
+  [0, 1] and would band cleanly while meaning nothing; `train_scorer` always fits its own
+  featurizer, with no parameter to accept a prefit one, which makes the out-of-fold loop
+  leak-proof by construction; and `PlattCalibrator` rejects a non-positive slope, so calibration
+  can never reorder pairs. Every interpretive sentence in the report is chosen from the measured
+  value rather than printed unconditionally, and a synthetic report exercises the branches
+  Abt-Buy never reaches — a claim true on one dataset and asserted regardless is false on the
+  next.
 
-Implemented but **untested**: `data/__init__.py`'s `DATASETS` registry and `load_dataset()`, which
-let a CLI resolve a benchmark by name so no later stage has to import a loader module. Its two error
-paths — unknown dataset name, and a dataset directory that does not exist because `data/` is
-gitignored — were checked by hand and never pinned by a test. Nothing under `tests/` imports it:
-`test_data_abt_buy.py`, `test_blocking_evaluate.py` and `test_features_evaluate.py` all call
-`dedup.data.abt_buy` directly, so the registry is exercised only by the three CLIs
-(`dedup.eval.baseline`, `dedup.blocking.evaluate`, `dedup.features.evaluate`) and would not fail a
-test run if it broke. Adding `features/` widened the gap rather than closing it: there is now a
-third CLI depending on code no test touches.
+Implemented but **untested**: the four CLI entry points — `main()` in `eval/baseline.py`,
+`blocking/evaluate.py`, `features/evaluate.py` and `model/evaluate.py`. Every test calls the
+functions beneath them (`evaluate`, `render_markdown`) directly and none calls a `main()`, so
+coverage shows every line of all four unexecuted: argument parsing, dataset resolution, `--out`
+writing and the model CLI's `--cost-*` flags would not fail a test run if they broke. They were
+run by hand for this sync: `baseline` and `features` reproduce their committed reports
+byte-for-byte, `model` reproduces across repeated runs, and `blocking` matches except its
+wall-clock build/query columns, which drift run to run by nature. That is a check made once, not a
+guard.
 
-The remaining directories — `model/`, `cluster/`, `synth/`, `service/` — are all still bare
-`__init__.py` scaffolding with no modules in them.
+`data/__init__.py`'s `DATASETS` registry and `load_dataset()` were the long-standing untested gap
+— exercised only by the CLIs, so a break would not have failed a test run — and
+`tests/test_data_registry.py` now closes it: both hand-checked error paths (unknown dataset name,
+and a directory absent because `data/` is gitignored), plus a check that walks the real tree
+asserting no module outside `data/` imports a loader. That last one guards the rule rather than the
+plumbing, and a stage added later inherits it by existing.
 
-Next is **`model/`**, and it is now the only stage that can move: `cluster/` needs scored pairs
-from it, and `service/` needs both. `model/` is unblocked because `features/` now turns a candidate
-pair into a 33-column vector — LightGBM over those, then isotonic or Platt calibration, then the
-two cost-derived thresholds that define the three bands.
+The remaining directories — `cluster/`, `synth/`, `service/` — are still bare scaffolding: each
+holds only an `__init__.py` whose entire content is a docstring, and no modules.
 
-`model/` is also where the first number comparable to the baseline's **test F1 0.5204** appears.
-Nothing in `reports/features.md` is that number: those are univariate per-column PR-AUCs over the
-*blocked* candidate set, where 91% of pairs have already been discarded, so they are not
-comparable with a figure computed over the full N² triangle. `title_tfidf_cosine` scoring 0.5222
-there against the baseline's 0.4720 PR-AUC measures the candidate set, not the column.
+Next is **`cluster/`**, because it is the only unbuilt pipeline stage whose input now has data
+flowing through it. `model/` produces calibrated probabilities and an auto-merge band on Abt-Buy,
+and that band is the edge set a connected-components pass consumes; `entity_id` supplies the ground
+truth B-cubed scores against. `model/` has no persistence yet, so `cluster/` has to train and score
+in-process — enough to evaluate on, though `service/` will need a saved artifact. `service/`
+cannot be evaluated before `cluster/` exists, since it serves entities rather than pairs. `synth/`
+depends on nothing downstream — it produces data rather than consuming it — so it can move in
+parallel.
+
+`model/` answered the comparison the project is built around: **test F1 0.8934** against the
+baseline's 0.5204, at a threshold chosen on train and spent on test. Read `reports/model.md` before
+quoting it, because precision in those two rows is not measured on the same candidate set —
+blocking discarded 91% of the test triangle before the model saw anything, while the baseline
+scored the full N² triangle. Recall *is* like-for-like. Nothing in `reports/features.md` is that
+number either: those are univariate per-column PR-AUCs over the blocked candidate set, so
+`title_tfidf_cosine` scoring 0.5222 there against the baseline's 0.4720 PR-AUC measures the
+candidate set, not the column.
 
 Two caveats on the blocking ceiling of 0.9928, both measured. It is a **full-catalog** figure; on
 the entity-grouped split the union reaches 0.9949 on train and 1.0000 on test — both re-derived by
-`tests/test_features_evaluate.py` — and the test number is the ceiling that actually binds
-when `features/` and `model/` are compared against the baseline's test-split F1
-0.5204. And the blocker parameters were **swept over the same catalog they are scored on**, so it is
-a best-of-sweep number, not a clean estimate — small bias here, but unquantified until parameters
+`tests/test_features_evaluate.py` — and the test number is the one that applies when `features/`
+and `model/` are compared against the baseline's test-split F1 0.5204. At 1.0000 it caps nothing
+on that split, which `reports/model.md` states from the measurement rather than assuming. And the
+blocker parameters were **swept over the same catalog they are scored on**, so it is a
+best-of-sweep number, not a clean estimate — small bias here, but unquantified until parameters
 are selected on train alone.
 
 Commands in this file describe the intended contract — verify a command exists before relying on it,
@@ -198,6 +232,27 @@ Settled by measurement, recorded so it is not re-litigated:
   price is $1.75 with two rows under $5, so the distortion is confined to a corner of the range
   that barely exists, and a tree model splits on thresholds rather than reading the value as a
   ratio. Pinned by a test so it stays a known property.
+- **Calibration is fit out-of-fold on entity-grouped folds of train, with Platt, not isotonic.**
+  The obvious design was a third held-out split calibrated with isotonic, which the invariant names
+  first. Isotonic lost on resolution exactly where the cost model reads: fit on a held-out split's
+  230 positives it produces **one** distinct output level at or above 0.9, and that level is 1.0, so
+  `p_hi = 0.95` cannot separate anything inside a 253-pair atom. Out-of-fold isotonic reaches 5
+  distinct outputs above 0.9; Platt keeps 285. Five entity-grouped folds also give the calibrator
+  777 positives against 230 and leave all 1521 train records for the booster, lifting its raw
+  precision at score 0.95 from 0.9669 to 0.9845 over one trained on a held-out split's remainder;
+  OOF Platt is the best calibrated of six variants measured (ECE 0.00085 against raw 0.00244 and
+  OOF isotonic 0.00318), with recall at 0.95 of 0.8006 against isotonic's 0.6510. Revisit at
+  `synth/` scale, where isotonic's shape advantage gets the positives it needs.
+- **The two thresholds are closed-form in the cost ratios, the default is 20 : 2 : 1, and Abt-Buy
+  cannot validate it.** Minimizing per-pair expected cost — `(1-p) * C_fm` to merge, `p * C_fs` to
+  reject, `C_review` to review — gives `p_hi = 1 - C_review/C_fm` and `p_lo = C_review/C_fs`, so the
+  absolute scale cancels. The default (`p_hi` 0.95, `p_lo` 0.50) prices a false merge at 20 reviews
+  because it is irreversible and because connected-components chaining fuses two clusters from one
+  bad edge, which a pairwise cost structurally understates. It cannot be fitted here: the calibrated
+  distribution is bimodal — 18,475 of 18,819 test candidates below 0.01, 280 above 0.95, 64 in the
+  whole middle — so `C_fm` anywhere in 10–100 moves the review queue only from 8 pairs to 35. It
+  stays a parameter, and `threshold.py` rejects an empty band: 20 : 1 : 1 gives `p_lo` 1.0 against
+  `p_hi` 0.95. Revisit when `synth/` populates the middle.
 
 ## What this is
 
@@ -272,11 +327,14 @@ src/dedup/
                   __init__.py holds DATASETS, the name -> loader registry
   eval/           metrics (PR-AUC, precision@k), entity-grouped splits, the TF-IDF baseline
   blocking/       standard, sorted_neighborhood, lsh, ann, union + evaluate
+                  defaults.py holds default_blocker_set and block_split — the shared runner every
+                  stage after blocking/ uses, so none of them imports out of a CLI module
                   pairs.py packs candidate pairs as int64 i*n+j — 8 bytes each, so the same
                   code survives the jump to synth/ scale; base.py holds the Blocker contract
   features/       string, numeric, semantic, missingness + base (the FeatureSpec contract),
                   vectorize (PairFeaturizer: fit on train, transform anywhere) + evaluate
-  model/          train, calibrate, threshold (cost model)
+  model/          train (PairScorer + prepare), calibrate (out-of-fold Platt), threshold (cost
+                  model), evaluate — the CLI behind reports/model.md
   cluster/        components, correlation, agglomerative, bcubed
   synth/          corruption engine for synthetic scale-up
   service/        FastAPI app, HNSW + inverted index, review queue
@@ -285,6 +343,7 @@ reports/          blocking table, PR curves, cost curves — the defensible resu
   blocking.md         blocker x completeness x reduction; the union row is the recall ceiling
   features.md         per-column coverage, PR-AUC and class separation; not comparable to the
                       baseline's numbers, which are computed over the full N^2 triangle
+  model.md            the F1 against the baseline, calibration quality, and the three bands
 ```
 
 `eval/metrics.py` is where the metric invariants below are actually enforced, so a new stage should
@@ -381,7 +440,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (250 passing, 1 skipped)
+pytest                                  # all (346 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -401,18 +460,23 @@ python -m dedup.blocking.evaluate --dataset abt-buy --out reports/blocking.md
 # per-feature diagnostics: coverage x PR-AUC x class separation
 # --semantic adds the sentence-transformers column (downloads ~90 MB on first use)
 python -m dedup.features.evaluate --dataset abt-buy --out reports/features.md
+
+# the model: F1 against the baseline, calibration quality, cost-derived bands
+# --cost-false-merge / --cost-false-split / --cost-review override the 20 : 2 : 1 default
+python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Seven tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
+Twenty-one tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
 integration test in `tests/test_data_abt_buy.py`, one in `tests/test_eval_baseline.py` that
 re-derives the published baseline F1, one in `tests/test_blocking_evaluate.py` that re-derives the
-published union pair completeness, and four in `tests/test_features_evaluate.py` that re-derive the
-per-split blocking ceiling and the feature ranking. So a green run does *not* by itself mean the
-real files were checked, and in particular does not mean any published number was reproduced —
-`pytest -rs` reports the skips.
+published union pair completeness, four in `tests/test_features_evaluate.py` that re-derive the
+per-split blocking ceiling and the feature ranking, and fourteen in `tests/test_model_evaluate.py`
+that re-derive the headline F1, the calibration properties, the band shape and the blocking-loss
+accounting. So a green run does *not* by itself mean the real files were checked, and in
+particular does not mean any published number was reproduced — `pytest -rs` reports the skips.
 
-An eighth test skips for a different reason and is not about the benchmark: the
+One more test skips for a different reason and is not about the benchmark: the
 sentence-transformers column is opt-in, and its weights are not downloaded. That is the one skip
 in a normal run.
 
@@ -427,7 +491,6 @@ Not built yet — intended contract, will fail if invoked:
 
 ```bash
 # pipeline stages
-python -m dedup.model.train
 python -m dedup.cluster.evaluate
 
 # service
@@ -451,7 +514,7 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`, `eval`, `features`. Reserved for modules not yet built: `model`, `cluster`, `service`,
+`blocking`, `eval`, `features`, `model`. Reserved for modules not yet built: `cluster`, `service`,
 `data-gen`. A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:

@@ -432,6 +432,149 @@ The stage that sets the ceiling. It exists because N² doesn't scale: 2,173 reco
 **2,359,878** pairs to find **1,118** real matches (1 in 2,100). At 1M records it's 500
 billion pairs.
 
+Because the README already covered this stage in less depth, this section leads with the
+**concepts** — what blocking is and how each technique works — and then walks the code
+file by file. If you only want the function reference, skip to *The code, file by file*.
+
+---
+
+#### The concepts
+
+**The problem, stated plainly.** To find every duplicate in a catalog of N records you
+would compare every record against every other — N(N−1)/2 pairs. That number grows with
+the *square* of the catalog: doubling the catalog quadruples the work. At Abt-Buy's 2,173
+records it is 2.36 million comparisons; at 200,000 records it is 20 billion; at 1 million,
+500 billion. You cannot run a similarity function, let alone a model, that many times. And
+it is wasteful: almost every one of those pairs is two obviously-unrelated products.
+
+**What blocking is.** Blocking is a cheap first pass that throws away the pairs that
+couldn't plausibly be matches, so the expensive stages only ever see a small **candidate
+set**. The classic way to do it: compute a cheap *block key* for each record, drop records
+that share a key into the same *block* (bucket), and only compare records inside the same
+block. Two records that never land in a common block are never compared — that is the
+saving, and also the risk.
+
+```
+Every record → a block key → records with the same key share a bucket
+                              → only within-bucket pairs become candidates
+
+  "Sony ... - PSLX350H"   key: PSLX350H  ┐
+  "Sony PS-LX350H ..."    key: PSLX350H  ┘ same bucket → candidate pair ✓
+  "Canon PIXMA iP4200"    key: IP4200      different bucket → never compared
+```
+
+**Blocking sets a ceiling nothing downstream can lift.** This is the single most important
+idea in the stage. If a true duplicate pair does not share any block with any blocker, it
+never enters the candidate set — so `features/` never vectorizes it, `model/` never scores
+it, `cluster/` never sees it. It is lost permanently, no matter how good the later stages
+are. That is why blocking is judged on recall of *true pairs*, and why we measure it
+first: when final recall disappoints, the ceiling here is the first thing to check.
+
+**The two numbers, always reported together.** A blocker is not scored like a classifier —
+there is deliberately no precision, F1 or accuracy anywhere in this stage, because a
+blocker's output is ~99% non-matches *by design* and discarding non-matches is the whole
+job. Instead:
+
+- **Pair completeness (PC)** — of all true duplicate pairs, the fraction that survived into
+  the candidate set. This is recall of the blocker, and it is the ceiling above. PC = 1.0
+  means every true pair is still reachable.
+- **Reduction ratio (RR)** — the fraction of the N² possible pairs that were discarded.
+  RR = 0.99 means only 1% of pairs remain to be scored. This is the saving.
+
+Neither number means anything alone, and each is trivially gamed by the other's expense:
+
+| Strategy | PC | RR | Useless because |
+| --- | --- | --- | --- |
+| keep every pair | 1.0000 | 0.0000 | no saving — you're back to N² |
+| emit nothing | 0.0000 | 1.0000 | perfect saving, zero recall |
+
+So they are **always printed side by side**, and the job is to push both toward 1.0 at
+once — high recall of true pairs *and* a small candidate set. On Abt-Buy the union of all
+blockers reaches PC 0.9928 at RR 0.9644.
+
+**Why several blockers, unioned.** No single blocking strategy catches every kind of
+duplicate — each has a blind spot baked into how its key works. An exact-key blocker misses
+a pair with a typo in the code; a sort-window blocker misses a pair that differs in its
+first word; a vector blocker can miss a pair that shares an exact rare code but sits far
+apart in embedding space. The fix is not a cleverer single blocker but **several weak ones
+that fail differently**, whose candidate sets are then *unioned*. A blocker earns its place
+by lifting the union's PC — not by its standalone score. One that raises the candidate
+count without lifting the union is pure cost, and the report is built to expose exactly
+that (see the marginal-completeness discussion in `union.py` and CLAUDE.md).
+
+##### The four strategies, as ideas
+
+**1. Exact-key blocking** (`standard.py`) — the cheapest and, on clean vendor codes, the
+most precise. Compute a key from each record and bucket by exact string equality. The keys
+used here: the extracted model number (`PSLX350H`), every code-shaped token in the title
+(in case extraction picked the wrong one), and *rare* title tokens (a word appearing in ≤30
+records behaves like an accidental identifier; common words like "black" would bucket
+everything). Its weakness is that it is *exact*: `KXTS208W` and `KX-TS208W` are the same
+phone but share no key — which is exactly why `normalize.py` produces `model_number_key`,
+the separator-stripped comparison form, so the reduction happens once, upstream, and both
+records key the same way.
+
+**2. Sorted-neighborhood** (`sorted_neighborhood.py`) — designed to *survive a bad key*.
+Sort every record by a key (e.g. the normalized title), then slide a window of width `w`
+down the sorted order; every pair falling within `w` positions of each other becomes a
+candidate. The insight: two records that differ by one character usually still sort next to
+each other, so a window catches them even though exact-key blocking would not. Its blind
+spot is the mirror image: it only catches differences *late* in the sort key. `Bose 161WH`
+and `Boss 161 Speaker` differ in the first word, so they sort far apart and no reasonable
+window reaches across the gap.
+
+**3. MinHash + LSH** (`lsh.py`) — approximate set-similarity search, sublinearly. Four
+ideas stack up:
+
+- **Shingles** — break each title into a *set* of overlapping pieces, either whole tokens
+  or character k-grams. `"sony turntable"` → `{sony, turntable}` (token) or
+  `{sony, ony_, ny_t, ...}` (char). Now "similar title" becomes "overlapping sets".
+- **Jaccard similarity** — the overlap of two sets: |A ∩ B| / |A ∪ B|. 1.0 if identical, 0
+  if disjoint. This is the target similarity, but computing it for all N² pairs is the very
+  cost we are avoiding.
+- **MinHash** — a compact signature (here 128 numbers) that *estimates* Jaccard without
+  storing the sets: the probability that two records' MinHash values agree equals their
+  Jaccard similarity. So set comparison becomes cheap integer comparison.
+- **LSH (locality-sensitive hashing)** — bands the signatures and hashes each band into
+  buckets, arranged so that high-Jaccard records collide (share a bucket) with high
+  probability and dissimilar ones almost never do. The `threshold` parameter tunes where
+  that collision curve turns on. The net effect: near-duplicate sets are found without ever
+  building the N² Jaccard matrix. Its measured blind spot on Abt-Buy is instructive —
+  titles are only 6–10 tokens, so token-shingle sets are tiny and Jaccard over them is
+  coarse (dropping one token moves it a lot), which is why this blocker adds *zero* marginal
+  recall here despite working fine in principle. Character shingles would densify the sets;
+  the knob is left exposed so the claim can be re-tested on `synth/`.
+
+**4. Approximate nearest neighbours / HNSW** (`ann.py`) — the strongest single blocker
+here (PC 0.9562 alone), and the only one that needs *no shared token at all*. Three ideas:
+
+- **Vector embedding** — turn each title into a point in high-dimensional space. Here that's
+  character-3gram TF-IDF, L2-normalized, so that two titles' cosine similarity is just the
+  dot product of their vectors. "Similar product" becomes "nearby point".
+- **Nearest-neighbour search** — for each record, find its k closest points; those become
+  its candidate partners. Because it works in continuous space, it catches pairs a
+  character typo would break for every key-based method: `Bose 161WH` and `Boss 161 Speaker`
+  have a misspelled brand and *still* land near each other in char-3gram space.
+- **HNSW (Hierarchical Navigable Small World)** — doing exact nearest-neighbour search is
+  itself N², so HNSW approximates it. It builds a layered proximity graph (a few long-range
+  links up top, dense local links at the bottom) and answers a query by greedily walking the
+  graph toward the target — sublinear, at the cost of occasionally missing a true neighbour.
+  Its knobs: `M` (links per node), `efConstruction` (how hard it works while building),
+  `efSearch` (how hard it works per query — the main recall dial), and `k` (neighbours
+  returned per record). Built via `faiss.IndexHNSWFlat`.
+
+**The candidate-pair representation** (`pairs.py`) — every blocker emits the *same* thing so
+the union is cheap: a sorted, deduplicated array of int64 keys, where an unordered pair of
+record indices `(i, j)` with `i < j` is packed as `i * n + j`. A set of Python tuples would
+cost >100 bytes per pair (gigabytes at synth scale); packed int64 is 8 bytes each (~160 MB
+for the same set), and unioning several blockers becomes a single `np.unique(concatenate)`
+sort rather than millions of hash lookups. The `i < j` rule is what makes a pair
+*unordered*, so two blockers that both find the same pair don't double-count it.
+
+---
+
+#### The code, file by file
+
 #### `blocking/base.py` — the contract
 
 | Name | What it does |
