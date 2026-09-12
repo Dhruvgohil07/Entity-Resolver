@@ -110,3 +110,41 @@ def true_pair_ids(records: list[Record]) -> set[frozenset[str]]:
         for group in group_by_entity(records).values()
         for pair in combinations((record.record_id for record in group), 2)
     }
+
+
+def kfold_by_entity(
+    records: list[Record],
+    *,
+    n_folds: int = 5,
+    seed: int = 0,
+) -> list[list[Record]]:
+    """Partition records into `n_folds` parts so no entity spans two of them.
+
+    The same rule as `split_by_entity`, applied K ways: whole entities move
+    together, so a fold's records can be blocked and scored as a self-contained
+    catalog. That is what makes out-of-fold calibration honest -- a model
+    scoring fold k has seen no record of any entity in fold k, so its
+    predictions there carry the same optimism as predictions on unseen data.
+
+    Entities are dealt round-robin over the folds after shuffling rather than
+    sliced into K contiguous runs, which keeps the fold sizes close even when
+    cluster sizes vary. As in `split_by_entity`, ids are sorted before
+    shuffling so the result depends only on `seed` and the set of entities,
+    never on the order the loader returned rows in.
+    """
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be at least 2, got {n_folds}")
+
+    grouped = group_by_entity(records)
+    entity_ids = sorted(grouped)
+    if len(entity_ids) < n_folds:
+        raise ValueError(
+            f"cannot build {n_folds} folds from {len(entity_ids)} entities -- "
+            f"every fold must hold at least one entity"
+        )
+    np.random.default_rng(seed).shuffle(entity_ids)
+
+    folds: list[list[Record]] = [[] for _ in range(n_folds)]
+    for position, entity_id in enumerate(entity_ids):
+        folds[position % n_folds].extend(grouped[entity_id])
+    return folds
