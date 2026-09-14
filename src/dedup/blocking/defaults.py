@@ -25,19 +25,26 @@ from dedup.blocking.union import BlockerScore, ground_truth, score, union_run
 from dedup.normalize import NormalizedRecord
 
 
-def default_blocker_set() -> list[Blocker]:
+def default_blocker_set(ann_components: int | None = None) -> list[Blocker]:
     """Every blocker, including the ones measurement says do not earn their place.
 
     `lsh` contributes zero marginal completeness on this benchmark and
     `sorted_neighborhood` buys 0.0044 for 30k candidates. They stay in the
     table because a negative result someone can re-run is evidence, and the
     same result asserted from a deleted experiment is not.
+
+    `ann_components` projects `ann`'s TF-IDF vectors with SVD before indexing,
+    for a catalog too large for the dense index. It is a parameter, never a
+    size-triggered default: switching projection on changes `ann`'s candidates
+    and so the recall ceiling every later stage inherits, and a ceiling that
+    moves because the catalog grew past a threshold is one nobody chose.
+    `None` is the set every committed report was measured with.
     """
     return [
         *default_blockers(),
         SortedNeighborhoodBlocker(window=20),
         MinHashLSHBlocker(threshold=0.4, shingles="token"),
-        AnnBlocker(neighbours=10),
+        AnnBlocker(neighbours=10, n_components=ann_components),
     ]
 
 

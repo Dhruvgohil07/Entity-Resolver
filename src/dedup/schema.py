@@ -59,10 +59,21 @@ class Record(BaseModel):
 
     # Ground-truth cluster/entity id. Present when loaded from a labeled
     # benchmark or synth-corrupted dataset; None for a genuinely new record
-    # arriving at serve time with no known identity yet. This is what a
-    # future entity-level (never pair-level) train/test splitter keys off --
-    # that splitter does not exist yet; only the field is reserved here.
+    # arriving at serve time with no known identity yet. This is what the
+    # entity-level (never pair-level) splitter in eval/splits.py keys off.
     entity_id: str | None = None
+
+    # Leakage group for splitting. Records sharing a split_group are kept on
+    # one side of every train/test split and every fold, together with every
+    # record of their entities; None makes the entity alone the unit, which is
+    # what every benchmark loader leaves it as. It exists for data whose
+    # *distinct* entities share source text: synth/ derives sibling products
+    # and their duplicates from one seed listing, and putting siblings on both
+    # sides of a split scores a test entity against training records built
+    # from the same seed title -- the leak entity-grouped splitting prevents,
+    # one level up. A field rather than a raw_attributes key because a
+    # pipeline stage reads it, and raw_attributes is the one no stage reads.
+    split_group: NonBlankStr | None = None
 
     # Required: every in-scope source always has a name/title. A title-less
     # record can't be scored by the TF-IDF baseline or any string feature,

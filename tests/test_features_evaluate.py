@@ -16,14 +16,21 @@ downloaded. `pytest -rs` reports the skip -- a green run is not by itself
 evidence that the real files were checked.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from dedup.blocking.union import BlockerScore
+from dedup.data import DATASETS
 from dedup.data.abt_buy import load_abt_buy
+from dedup.eval.baseline import read_baseline_row
 from dedup.features.base import FeatureSpec
 from dedup.features.evaluate import (
+    FeatureDiagnostic,
+    FeatureReport,
+    SplitFeatures,
     block,
     correlated_pairs,
     diagnose,
@@ -34,6 +41,7 @@ from dedup.features.semantic import DEFAULT_MODEL, SemanticBlock, model_is_cache
 from dedup.normalize import normalize
 
 REAL_DATA = Path(__file__).parent.parent / "data" / "raw" / "abt-buy"
+BASELINE_REPORT = Path(__file__).parent.parent / "reports" / "baseline_tfidf.md"
 
 SIMILARITY = FeatureSpec("sim", "doc")
 DISTANCE = FeatureSpec("dist", "doc", higher_is_similar=False)
@@ -222,6 +230,88 @@ def normalize_title(title):
     from dedup.schema import Record
 
     return normalize(Record(record_id="s:x", source="synthetic", entity_id="e1", title=title))
+
+
+# ---------------------------------------------------------------------------
+# The report says what the dataset supports, and only that
+# ---------------------------------------------------------------------------
+
+
+def synthetic_feature_report():
+    """A hand-built report, so the renderer is checked without a dataset."""
+    union = BlockerScore("union (all)", "—", 100, 1.0, 0.9, None, None, 10, 10)
+    test = SplitFeatures("test", 50, 10, union, np.array([True] * 10 + [False] * 90))
+    diagnostics = [
+        FeatureDiagnostic(FeatureSpec("title_tfidf_cosine", "doc"), 1.0, 0.6, 0.8, 0.2, 10, 100),
+        # Points backwards, so the wrong-way section has a row to explain.
+        FeatureDiagnostic(FeatureSpec("desc_len_ratio", "doc"), 0.5, 0.1, 0.2, 0.5, 5, 50),
+    ]
+    return FeatureReport(
+        dataset="synthetic",
+        seed=0,
+        test_fraction=0.3,
+        include_semantic=False,
+        n_records=150,
+        n_entities=70,
+        n_true_pairs=30,
+        train=replace(test, name="train", n_records=100),
+        test=test,
+        diagnostics=diagnostics,
+        correlated=[],
+    )
+
+
+def flat(markdown):
+    return " ".join(markdown.split())
+
+
+def test_a_report_with_no_notes_or_baseline_makes_no_abt_buy_claim():
+    text = flat(render_markdown(synthetic_feature_report()))
+    for claim in (
+        "0.5204",
+        "0.4720",
+        "Buy against Buy",
+        "8 of 341",
+        "2.3% of positives",
+        "swept on the full catalog",
+        "changed a published number",
+    ):
+        assert claim not in text
+    assert "no baseline report is registered" in text
+
+
+def test_abt_buys_notes_and_baseline_restore_its_passages():
+    baseline = read_baseline_row(BASELINE_REPORT, dataset="abt-buy")
+    text = flat(
+        render_markdown(
+            synthetic_feature_report(), notes=DATASETS["abt-buy"].notes, baseline=baseline
+        )
+    )
+    assert "**test F1 0.5204**" in text
+    assert "comparable to the baseline's 0.4720" in text
+    assert "Buy against Buy" in text
+    assert "scores *higher*" in text
+
+
+def test_a_column_below_the_baseline_is_not_said_to_score_higher():
+    baseline = replace(read_baseline_row(BASELINE_REPORT, dataset="abt-buy"), pr_auc=0.9)
+    text = flat(render_markdown(synthetic_feature_report(), baseline=baseline))
+    assert "scores *higher*" not in text
+    assert "did not flatter it here" in text
+
+
+def test_a_floored_baseline_carries_its_caveat_into_the_comparison():
+    baseline = replace(
+        read_baseline_row(BASELINE_REPORT, dataset="abt-buy"), min_similarity=0.2, recall_ceiling=0.98
+    )
+    text = flat(render_markdown(synthetic_feature_report(), baseline=baseline))
+    assert "scored above a similarity floor of 0.2" in text
+    assert "PR-AUC ends at that ceiling and is a lower bound" in text
+
+
+def test_the_regenerate_command_names_the_out_path():
+    text = render_markdown(synthetic_feature_report(), out="reports/synth/features.md")
+    assert "--out reports/synth/features.md" in text
 
 
 # ---------------------------------------------------------------------------

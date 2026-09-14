@@ -7,6 +7,7 @@ same shape as the `precision_at_k` defect an audit caught in eval/metrics.py
 -- any denominator taken from the survivors rewards discarding candidates.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +15,16 @@ import pytest
 
 from dedup.blocking.ann import AnnBlocker
 from dedup.blocking.base import BlockerRun
-from dedup.blocking.evaluate import default_blocker_set, evaluate, render_markdown
+from dedup.blocking.evaluate import (
+    BRUTE_FORCE_PAIRS,
+    default_blocker_set,
+    evaluate,
+    render_markdown,
+)
 from dedup.blocking.pairs import pack, total_pairs, union
 from dedup.blocking.standard import StandardBlocker, code_token_keys, model_number_keys
 from dedup.blocking.union import ground_truth, missed_pairs, score, union_run
+from dedup.data import DATASETS
 from dedup.data.abt_buy import load_abt_buy
 from dedup.normalize import normalize
 from dedup.schema import Record
@@ -197,10 +204,51 @@ def test_report_has_no_precision_or_f1_column(catalog):
         assert forbidden not in header
 
 
-def test_report_states_the_benchmark_is_pre_blocked(catalog):
-    # Without this the union PC reads as "blocking is solved".
-    markdown = render_markdown(evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic"))
+def test_the_datasets_own_caveats_are_printed(catalog):
+    # Abt-Buy's registry entry is what says it is pre-blocked and that its
+    # parameters were swept on it. Without that the union PC reads as "blocking
+    # is solved".
+    report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="abt-buy")
+    markdown = render_markdown(report, notes=DATASETS["abt-buy"].notes)
     assert "pre-blocked" in markdown
+    assert "chosen against these same numbers" in markdown
+    assert "0.9949 on train and 1.0000 on test" in markdown
+
+
+def test_a_dataset_without_notes_is_not_described_as_abt_buy(catalog):
+    # The regression. This test used to assert the opposite -- that a report
+    # built with dataset="synthetic" says "pre-blocked" -- which pinned a false
+    # claim about every catalog that is not Abt-Buy.
+    markdown = render_markdown(evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic"))
+    for claim in ("pre-blocked", "0.9949", "chosen against these same numbers"):
+        assert claim not in markdown
+
+
+def test_reduction_ratio_is_called_load_bearing_past_exhaustive_scale(catalog):
+    report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
+    assert "flattered by a small N" in render_markdown(report)
+
+    large = render_markdown(replace(report, n_all_pairs=BRUTE_FORCE_PAIRS + 1))
+    assert "flattered by a small N" not in large
+    assert "At this N the reduction ratio is load-bearing" in large
+
+
+def test_a_run_that_left_a_blocker_out_says_its_union_is_not_the_default_ceiling(catalog):
+    """At 166k synthetic records token LSH cannot run; a table without it must say so."""
+    full = render_markdown(evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic"))
+    assert "Not every default blocker ran" not in full
+
+    report = evaluate(
+        catalog, [AnnBlocker(neighbours=2)], dataset="synthetic", omitted=["lsh (minhash)"]
+    )
+    text = " ".join(render_markdown(report).split())
+    assert "Not every default blocker ran: `lsh (minhash)` did not." in text
+
+
+def test_the_regenerate_command_reproduces_the_run(catalog):
+    report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
+    markdown = render_markdown(report, out="reports/synth/blocking.md", flags=" --ann-components 8")
+    assert "--dataset synthetic --ann-components 8 --out reports/synth/blocking.md" in markdown
 
 
 # ---------------------------------------------------------------------------

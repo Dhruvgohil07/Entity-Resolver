@@ -1,4 +1,6 @@
-"""Corruption engine for synthetic scale-up: typos, abbreviations, token drop/reorder,
-unit swaps, price jitter, brand aliasing -- used to scale a benchmark catalog to
-200k-1M records with known ground truth (CLAUDE.md, Data).
+"""Synthetic catalogs derived from a real one: distinct products, their duplicates, known truth.
+
+families (a seed product and its near and far siblings), corrupt (one product into its
+listings), generate (the catalog, and the CLI that writes it through data/synthetic.py),
+realism (how hard the duplicates are, measured identically on seeds and output).
 """

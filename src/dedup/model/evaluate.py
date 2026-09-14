@@ -33,11 +33,12 @@ import argparse
 import sys
 import textwrap
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
-from dedup.data import DATASETS, load_dataset
+from dedup.data import DATASETS, NO_NOTES, DatasetNotes, load_dataset
+from dedup.eval.baseline import BaselineRow, floor_caveat, registered_baseline
 from dedup.eval.metrics import (
     ThresholdPoint,
     average_precision,
@@ -60,19 +61,12 @@ from dedup.model.threshold import BandSummary, CostModel, band_summary
 from dedup.model.train import PreparedSplit, prepare
 from dedup.schema import Record
 
-# The title-only row of reports/baseline_tfidf.md, restated so this report is
-# readable on its own. Not recomputed here: re-deriving it would mean rebuilding
-# the baseline's full N^2 scoring on every model run. A test compares these
-# against the committed report, so regenerating the baseline cannot leave them
-# silently stale.
-BASELINE_TEST_F1 = 0.5204
-BASELINE_TEST_PRECISION = 0.4605
-BASELINE_TEST_RECALL = 0.5982
-BASELINE_TEST_PR_AUC = 0.4720
-BASELINE_TEST_P_AT_K = {10: 0.600, 100: 0.620}
-BASELINE_TEST_R_PRECISION = 0.504
-BASELINE_THRESHOLD = 0.6243  # a cosine, not a probability
-BASELINE_ORACLE_F1 = 0.5249
+DEFAULT_OUT = "reports/model.md"
+
+# A dataset's notes may say why a column ranks where it does on gain, under this
+# prefix plus the column's name (data/notes.py). The baseline row this report
+# restates is read from the dataset's committed baseline report, never held here.
+GAIN_COLUMN_SLOT = "model.gain_column."
 
 PRECISION_AT_K = (10, 100)
 IMPORTANCE_ROWS = 10
@@ -317,7 +311,9 @@ def _bullet(text: str) -> str:
     )
 
 
-def _reading_notes(report: ModelReport) -> list[str]:
+def _reading_notes(
+    report: ModelReport, dataset_notes: DatasetNotes, baseline: BaselineRow | None
+) -> list[str]:
     """The "Reading this honestly" bullets, each chosen from what was measured.
 
     No interpretive sentence here is printed unconditionally. The CLI takes any
@@ -329,27 +325,52 @@ def _reading_notes(report: ModelReport) -> list[str]:
     may know which benchmark it is running on.
     """
     bands, cost, test, train = report.bands, report.cost, report.test, report.train
-    notes = [
-        (
-            f"**Precision is not comparable to the baseline's; recall is.** Blocking discarded "
-            f"{test.reduction_ratio:.2%} of the test triangle before the model saw anything, so "
-            f"the negatives this model is scored against are the hard ones that survived. The "
-            f"baseline scored the full N² triangle. Recall *is* like-for-like — both divide by "
-            f"every true pair in the split, {test.n_positives_total} of them — so the honest "
-            f"summary is that this beats the baseline as a **pipeline**, not that the classifier "
-            f"beats TF-IDF on equal footing."
-        )
-    ]
+    if baseline is None:
+        bullets = [
+            (
+                f"**No baseline is registered for this dataset, so this report compares against "
+                f"nothing.** Blocking discarded {test.reduction_ratio:.2%} of the test triangle "
+                f"before the model saw anything, so the negatives it is scored against are the "
+                f"hard ones that survived. A baseline added later that scores every pair would be "
+                f"comparable on recall, which divides by all {test.n_positives_total} true pairs "
+                f"in the split, and not on precision."
+            )
+        ]
+    elif report.test_point.f1 > baseline.f1:
+        bullets = [
+            (
+                f"**Precision is not comparable to the baseline's; recall is.** Blocking discarded "
+                f"{test.reduction_ratio:.2%} of the test triangle before the model saw anything, so "
+                f"the negatives this model is scored against are the hard ones that survived. The "
+                f"baseline scored the full N² triangle. Recall *is* like-for-like — both divide by "
+                f"every true pair in the split, {test.n_positives_total} of them — so the honest "
+                f"summary is that this beats the baseline as a **pipeline**, not that the classifier "
+                f"beats TF-IDF on equal footing."
+            )
+        ]
+    else:
+        bullets = [
+            (
+                f"**This pipeline does not beat the baseline here.** Test F1 "
+                f"{report.test_point.f1:.4f} against {baseline.f1:.4f}. Precision is not "
+                f"comparable — blocking discarded {test.reduction_ratio:.2%} of the test triangle "
+                f"first, while the baseline scored all of it — but recall is, and both divide by "
+                f"every true pair in the split, {test.n_positives_total} of them."
+            )
+        ]
+    caveat = None if baseline is None else floor_caveat(baseline)
+    if caveat is not None:
+        bullets.append(caveat)
 
     if test.n_blocking_missed == 0:
-        notes.append(
+        bullets.append(
             f"**The recall ceiling is inherited, and on the test split it does not bind.** "
             f"Blocking reaches PC {test.pair_completeness:.4f} on test "
             f"({train.pair_completeness:.4f} on train), so no test figure here is capped by the "
             f"blocker — a property of this split, not a general result."
         )
     else:
-        notes.append(
+        bullets.append(
             f"**The recall ceiling is inherited, and on the test split it binds.** Blocking "
             f"reaches PC {test.pair_completeness:.4f} on test, leaving {test.n_blocking_missed} "
             f"true pairs that no model can score, so every recall above is capped at "
@@ -359,7 +380,7 @@ def _reading_notes(report: ModelReport) -> list[str]:
     queues = [summary.n_review for summary in report.sensitivity]
     merges = [summary.cost.false_merge for summary in report.sensitivity]
     if max(queues) - min(queues) < RATIO_INSENSITIVE_FRACTION * max(test.n_candidates, 1):
-        notes.append(
+        bullets.append(
             f"**The cost ratio is not validated by this dataset.** Across the sensitivity grid "
             f"`C_fm` spans {min(merges):g}–{max(merges):g} and the review queue moves only "
             f"from {min(queues):,} to {max(queues):,} pairs out of {test.n_candidates:,}, because "
@@ -368,7 +389,7 @@ def _reading_notes(report: ModelReport) -> list[str]:
             f"middle of the distribution."
         )
     else:
-        notes.append(
+        bullets.append(
             f"**The cost ratio is load-bearing on this dataset.** Across the sensitivity grid the "
             f"review queue ranges from {min(queues):,} to {max(queues):,} pairs out of "
             f"{test.n_candidates:,}, so `C_fm` and `C_fs` should be set deliberately for this "
@@ -381,7 +402,7 @@ def _reading_notes(report: ModelReport) -> list[str]:
         f"emitted them — a blocking problem, not a model one."
     )
     if bands.n_missed == 0:
-        notes.append(
+        bullets.append(
             "**No true pair that blocking emitted was auto-rejected.**"
             + (f" {unreached}" if n_blocked_out else "")
         )
@@ -389,7 +410,7 @@ def _reading_notes(report: ModelReport) -> list[str]:
         blocking_part = (
             f"A further {unreached} " if n_blocked_out else "Blocking emitted every one of them. "
         )
-        notes.append(
+        bullets.append(
             f"**The auto-rejected true pairs are the real loss, and they are not a threshold "
             f"problem.** {bands.n_missed} true pairs fall below `p_lo`, and "
             f"{report.n_missed_confidently} of them score below {CONFIDENT_NEGATIVE} — the "
@@ -398,7 +419,7 @@ def _reading_notes(report: ModelReport) -> list[str]:
             f"stage, not a tuning knob."
         )
     else:
-        notes.append(
+        bullets.append(
             f"**Most auto-rejected true pairs are near misses.** {bands.n_missed} true pairs fall "
             f"below `p_lo`, but only {report.n_missed_confidently} score below "
             f"{CONFIDENT_NEGATIVE}; the rest sit between that and `p_lo` "
@@ -407,25 +428,35 @@ def _reading_notes(report: ModelReport) -> list[str]:
             + (f" A further {unreached}" if n_blocked_out else "")
         )
 
-    ranks = {name: rank for rank, (name, _) in enumerate(report.importance, start=1)}
-    if "desc_len_ratio" in ranks:
-        notes.append(
-            f"**`desc_len_ratio` ranks #{ranks['desc_len_ratio']} on gain, and that is "
-            f"expected.** CLAUDE.md records it pointing backwards univariately on Abt-Buy — a "
-            f"measured consequence of the deduplication framing — and a tree model uses a "
-            f"backwards column correctly where a human reading the column name does not."
-        )
+    # Why a column ranks where it does is a fact about the dataset, not about the
+    # column, so only the dataset's notes may say it (data/notes.py).
+    for rank, (name, _) in enumerate(report.importance, start=1):
+        explanation = dataset_notes.passages.get(f"{GAIN_COLUMN_SLOT}{name}")
+        if explanation:
+            bullets.append(
+                f"**`{name}` ranks #{rank} on gain, and that is expected.** {explanation}"
+            )
 
-    notes.append(
+    bullets.append(
         "**No class reweighting, and hyperparameters are untuned.** Both are deliberate; see "
         "`model/train.py`. Tuning would need a third split, and tuning against test is the leak "
         "this protocol exists to prevent."
     )
-    return [_bullet(note) for note in notes]
+    return [_bullet(note) for note in bullets]
 
 
-def render_markdown(report: ModelReport) -> str:
-    """The reports/ artifact: the numbers, plus what makes them readable."""
+def render_markdown(
+    report: ModelReport,
+    *,
+    notes: DatasetNotes = NO_NOTES,
+    baseline: BaselineRow | None = None,
+    out: str = DEFAULT_OUT,
+) -> str:
+    """The reports/ artifact: the numbers, plus what makes them readable.
+
+    `baseline` is the dataset's own committed baseline row. Without one the
+    report makes no comparison, rather than borrowing another dataset's number.
+    """
     at_k = " | ".join(f"{report.test_precision_at_k[k]:.3f}" for k in PRECISION_AT_K)
     bands, cost = report.bands, report.cost
     sensitivity = "\n".join(_band_row(s) for s in report.sensitivity)
@@ -435,7 +466,7 @@ def render_markdown(report: ModelReport) -> str:
         for rank, (name, gain) in enumerate(report.importance, start=1)
     )
     oof = report.out_of_fold
-    lift = report.test_point.f1 - BASELINE_TEST_F1
+    report_dir = PurePosixPath(out).parent.as_posix()
 
     # Never assert that blocking lost nothing -- measure it. It is zero on this
     # split, but the sentence has to stay true on one where it is not.
@@ -445,19 +476,46 @@ def render_markdown(report: ModelReport) -> str:
         if not n_blocked_out
         else f", on top of {n_blocked_out} that blocking never emitted"
     )
-    baseline_at_k = " | ".join(f"{BASELINE_TEST_P_AT_K[k]:.3f}" for k in PRECISION_AT_K)
-    notes = "\n".join(_reading_notes(report))
+    reading = "\n".join(_reading_notes(report, notes, baseline))
+
+    if baseline is None:
+        lead = (
+            "No baseline report is registered for this dataset, so nothing here is compared\n"
+            f"against one. Per-column PR-AUCs in `{report_dir}/features.md` are not this report's\n"
+            "number either."
+        )
+        baseline_row = ""
+        comparison = (
+            "No baseline row: none is registered for this dataset. The threshold above is a\n"
+            "calibrated probability."
+        )
+    else:
+        lead = (
+            f"The first number in this project comparable to the baseline's **test F1 "
+            f"{baseline.f1:.4f}** (`{baseline.path}`). Per-column PR-AUCs in\n"
+            f"`{report_dir}/features.md` are not that number and never were."
+        )
+        baseline_at_k = " | ".join(f"{baseline.precision_at_k[k]:.3f}" for k in PRECISION_AT_K)
+        baseline_row = (
+            f"\n| baseline (TF-IDF) | {baseline.f1:.4f} | {baseline.precision:.4f} "
+            f"| {baseline.recall:.4f} | {baseline.pr_auc:.4f} | {baseline_at_k} "
+            f"| {baseline.r_precision:.3f} | {baseline.threshold:.4f} | {baseline.oracle_f1:.4f} |"
+        )
+        lift = report.test_point.f1 - baseline.f1
+        comparison = (
+            f"F1 {lift:+.4f} against the baseline. **Precision in these two rows is not measured\n"
+            'on the same candidate set** — see "Reading this honestly". Each row\'s threshold is\n'
+            "on its own scale: a cosine for the baseline, a calibrated probability for the model."
+        )
 
     return f"""# Model: LightGBM over the pair vector, calibrated, cost-banded
 
-The first number in this project comparable to the baseline's **test F1 \
-{BASELINE_TEST_F1}** (`reports/baseline_tfidf.md`). Per-column PR-AUCs in
-`reports/features.md` are not that number and never were.
+{lead}
 
 Regenerate with:
 
 ```bash
-python -m dedup.model.evaluate --dataset {report.dataset} --out reports/model.md
+python -m dedup.model.evaluate --dataset {report.dataset} --out {out}
 ```
 
 ## Setup
@@ -495,14 +553,9 @@ them would mean nothing.
 | model | **{report.test_point.f1:.4f}** | {report.test_point.precision:.4f} \
 | {report.test_point.recall:.4f} | {report.calibrated.pr_auc:.4f} | {at_k} \
 | {report.test_r_precision:.3f} | {report.threshold_point.threshold:.4f} \
-| {report.test_oracle.f1:.4f} |
-| baseline (TF-IDF) | {BASELINE_TEST_F1:.4f} | {BASELINE_TEST_PRECISION:.4f} \
-| {BASELINE_TEST_RECALL:.4f} | {BASELINE_TEST_PR_AUC:.4f} | {baseline_at_k} \
-| {BASELINE_TEST_R_PRECISION:.3f} | {BASELINE_THRESHOLD:.4f} | {BASELINE_ORACLE_F1:.4f} |
+| {report.test_oracle.f1:.4f} |{baseline_row}
 
-F1 {lift:+.4f} against the baseline. **Precision in these two rows is not measured
-on the same candidate set** — see "Reading this honestly". Each row's threshold is
-on its own scale: a cosine for the baseline, a calibrated probability for the model.
+{comparison}
 
 ## Results — cost-derived bands
 
@@ -549,7 +602,7 @@ Reliability of the calibrated probabilities:
 
 ## Reading this honestly
 
-{notes}
+{reading}
 """
 
 
@@ -587,7 +640,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
         include_semantic=args.semantic,
     )
-    markdown = render_markdown(report)
+    notes = DATASETS[args.dataset].notes
+    markdown = render_markdown(
+        report,
+        notes=notes,
+        baseline=registered_baseline(notes, args.dataset),
+        out=DEFAULT_OUT if args.out is None else args.out.as_posix(),
+    )
     print(markdown)
 
     if args.out is not None:

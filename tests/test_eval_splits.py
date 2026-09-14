@@ -5,11 +5,13 @@ just reports a better number. So the tests assert the structural property
 (no entity on both sides) rather than any downstream score.
 """
 
+import numpy as np
 import pytest
 
 from dedup.eval.splits import (
     count_true_pairs,
     group_by_entity,
+    group_for_split,
     kfold_by_entity,
     split_by_entity,
     true_pair_ids,
@@ -221,3 +223,109 @@ def test_an_unlabeled_record_is_rejected_here_too():
     )
     with pytest.raises(ValueError, match="no entity_id"):
         kfold_by_entity(records)
+
+
+# ---------------------------------------------------------------------------
+# split_group -- distinct entities bound together because they share source
+# text. synth/ derives siblings and their duplicates from one seed listing, so
+# a sibling on each side of a split leaks the seed title the way a shared
+# entity would.
+# ---------------------------------------------------------------------------
+
+
+def make_family_records(families: list[list[int]]) -> list[Record]:
+    """One split group per family; each inner list is its entities' sizes."""
+    records = []
+    for family, entity_sizes in enumerate(families):
+        for entity, size in enumerate(entity_sizes):
+            for member in range(size):
+                records.append(
+                    Record(
+                        record_id=f"synthetic:f{family:03d}:e{entity}:{member}",
+                        source="synthetic",
+                        entity_id=f"synthetic:f{family:03d}:e{entity}",
+                        split_group=f"synthetic:f{family:03d}",
+                        title=f"family {family} product {entity} listing {member}",
+                    )
+                )
+    return records
+
+
+def test_a_split_group_never_straddles_train_and_test():
+    train, test = split_by_entity(make_family_records([[2, 1, 3]] * 30), seed=0)
+    assert {r.split_group for r in train} & {r.split_group for r in test} == set()
+
+
+def test_a_split_group_never_spans_two_folds():
+    folds = kfold_by_entity(make_family_records([[2, 2]] * 20), n_folds=5, seed=0)
+    seen: dict[str, int] = {}
+    for index, fold in enumerate(folds):
+        for record in fold:
+            assert seen.setdefault(record.split_group, index) == index
+
+
+def test_records_without_a_split_group_split_exactly_as_entities_do():
+    """The field must be invisible to every loader that never sets it.
+
+    Re-derived from the entity-grouped algorithm itself rather than from a saved
+    answer, so this pins the partition every committed report was produced on.
+    """
+    records = make_records([2, 3, 1] * 20)
+    entity_ids = sorted({r.entity_id for r in records})
+    np.random.default_rng(4).shuffle(entity_ids)
+    expected, filled = set(), 0
+    for entity_id in entity_ids:
+        if filled < 0.3 * len(records):
+            members = [r.record_id for r in records if r.entity_id == entity_id]
+            expected.update(members)
+            filled += len(members)
+
+    _, test = split_by_entity(records, test_fraction=0.3, seed=4)
+    assert {r.record_id for r in test} == expected
+
+
+def test_folds_without_a_split_group_are_exactly_the_entity_folds():
+    records = make_records([2, 3] * 12)
+    entity_ids = sorted({r.entity_id for r in records})
+    np.random.default_rng(7).shuffle(entity_ids)
+    expected: list[set[str]] = [set() for _ in range(5)]
+    for position, entity_id in enumerate(entity_ids):
+        expected[position % 5].update(r.record_id for r in records if r.entity_id == entity_id)
+
+    folds = kfold_by_entity(records, n_folds=5, seed=7)
+    assert [{r.record_id for r in fold} for fold in folds] == expected
+
+
+def test_an_entity_spanning_two_split_groups_is_rejected():
+    records = make_family_records([[2]] * 5)
+    stray = records[0].model_copy(
+        update={"record_id": "synthetic:stray", "split_group": "synthetic:elsewhere"}
+    )
+    with pytest.raises(ValueError, match="more than one split_group"):
+        split_by_entity([*records, stray])
+
+
+def test_an_entity_only_partly_grouped_is_rejected():
+    """None and a group are two different answers, not a default and a value."""
+    records = make_records([2] * 10)
+    records[0] = records[0].model_copy(update={"split_group": "synthetic:g1"})
+    with pytest.raises(ValueError, match="more than one split_group"):
+        kfold_by_entity(records)
+
+
+def test_a_split_group_named_like_an_entity_does_not_merge_with_it():
+    lone = Record(
+        record_id="synthetic:a:0", source="synthetic", entity_id="synthetic:a", title="lone"
+    )
+    grouped = [
+        Record(
+            record_id=f"synthetic:b:{i}",
+            source="synthetic",
+            entity_id="synthetic:b",
+            split_group="synthetic:a",
+            title=f"grouped {i}",
+        )
+        for i in range(2)
+    ]
+    units = group_for_split([lone, *grouped])
+    assert sorted(len(members) for members in units.values()) == [1, 2]

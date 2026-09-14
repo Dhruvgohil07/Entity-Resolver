@@ -298,6 +298,14 @@ def test_a_title_with_a_pipe_does_not_break_its_table():
     assert "Widget \\| 100" in text
 
 
+def test_cross_references_follow_the_report_directory():
+    """A synthetic catalog's cluster report points at its own model report, not Abt-Buy's."""
+    text = render_markdown(synthetic_report(), out="reports/synth/cluster.md")
+    assert "`reports/synth/model.md`" in text
+    assert "`reports/model.md`" not in text
+    assert "--out reports/synth/cluster.md" in text
+
+
 # ---------------------------------------------------------------------------
 # against the real benchmark (skipped unless downloaded)
 # ---------------------------------------------------------------------------
