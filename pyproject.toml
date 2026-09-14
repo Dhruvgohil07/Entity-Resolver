@@ -25,6 +25,9 @@ dependencies = [
     "sentence-transformers",
     # model
     "lightgbm",
+    # cluster
+    "scipy",               # sparse connected components -- already installed as a
+    # scikit-learn dependency, declared because cluster/ imports it directly
     # storage / service
     "duckdb",
     "fastapi",

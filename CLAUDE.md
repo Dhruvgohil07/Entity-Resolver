@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Seven stages implemented (`pytest` → 346 passing, 1 skipped; 94% line coverage). Two things are
+Eight stages implemented (`pytest` → 477 passing, 1 skipped; 94% line coverage). Two things are
 **not** covered by that run, and both are called out where they belong rather than folded into the
-count: the `semantic.py` carve-out inside the `features/` bullet, and the four CLI entry points
+count: the `semantic.py` carve-out inside the `features/` bullet, and the five CLI entry points
 under the list.
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
@@ -37,7 +37,9 @@ under the list.
   opt-in semantic block), fit on train and spent on test like the baseline. The missingness
   invariant is enforced by construction, not by review: every imputed column declares a
   `companion_indicator` and `validate_registry` rejects the featurizer at build time if one does
-  not resolve. Result committed at `reports/features.md`. One carve-out: `semantic.py`'s
+  not resolve. No test imports `missingness.py` by name; it is reached, at 100% line coverage,
+  through `vectorize.py`, which `tests/test_features_vectorize.py` and `test_model_train.py`
+  import. Result committed at `reports/features.md`. One carve-out: `semantic.py`'s
   `SemanticBlock.fit` and `.transform` are **not exercised on a normal run** — only its `specs`
   and `model_is_cached` are, because the test that encodes anything is gated on weights that are
   not downloaded. The block is implemented and its behaviour is unverified here.
@@ -56,16 +58,40 @@ under the list.
   value rather than printed unconditionally, and a synthetic report exercises the branches
   Abt-Buy never reaches — a claim true on one dataset and asserted regardless is false on the
   next.
+- **`cluster/`** — six modules: `base.py` (`ScoredGraph`, and `expected_partition_cost` — the
+  bands' cost model applied to every pair a partition decides: merged pairs at `(1-p)·C_fm`,
+  pairs left apart falling back to review or rejection, pairs blocking never emitted at p = 0),
+  `bcubed.py` (B-cubed over every record in the split, and the pairs a partition merges),
+  `components.py` (connected components, plus the label-free implied-pair count that exposes
+  chaining), `agglomerative.py` (average linkage, merging while a merge lowers that cost),
+  `correlation.py` (pivot and local search over the same objective) and `evaluate.py` (the CLI).
+  On the Abt-Buy test split, components over the auto-merge band reaches B³ F1 0.9449 but fuses 4
+  clusters through 11 implied pairs, realized cost 420; **average linkage reaches B³ P 0.9985 /
+  R 0.8978, fuses 1, queues 23 pairs for review and bills 155** — against 265 for the pairwise
+  bands alone on the same terms, and an all-singletons floor of B³ F1 0.6598. Chaining is
+  demonstrated, not hidden: at the best-pairwise-F1 threshold components fuses 19 clusters, the
+  largest of 11 records. Result in `reports/cluster.md`. Three things are enforced rather than
+  reviewed: every metric and cost refuses a label array whose length does not match the split, so
+  a clusterer cannot flatter B-cubed by leaving out the records no edge touched; a lone pair
+  merges exactly where the bands would auto-merge it; and correlation clustering starts its local
+  search from both simpler partitions, so on its own objective it can never do worse than either.
+  The lone-pair rule holds for lone pairs only: inside a larger cluster the objective can merge a
+  pair the bands would send to review, so clustering does not strictly respect the review queue.
+  The `er-invariants` audit built the case, recorded under the per-pair review question below;
+  neither cost-based clusterer merges such a pair on the Abt-Buy test split. One report branch is
+  rendered by a test but never computed by one: `evaluate.py`'s "separated, but split an entity"
+  verdict, which no partition in the suite earns.
 
-Implemented but **untested**: the four CLI entry points — `main()` in `eval/baseline.py`,
-`blocking/evaluate.py`, `features/evaluate.py` and `model/evaluate.py`. Every test calls the
-functions beneath them (`evaluate`, `render_markdown`) directly and none calls a `main()`, so
-coverage shows every line of all four unexecuted: argument parsing, dataset resolution, `--out`
-writing and the model CLI's `--cost-*` flags would not fail a test run if they broke. They were
-run by hand for this sync: `baseline` and `features` reproduce their committed reports
-byte-for-byte, `model` reproduces across repeated runs, and `blocking` matches except its
-wall-clock build/query columns, which drift run to run by nature. That is a check made once, not a
-guard.
+Implemented but **untested**: the five CLI entry points — `main()` in `eval/baseline.py`,
+`blocking/evaluate.py`, `features/evaluate.py`, `model/evaluate.py` and `cluster/evaluate.py`.
+Every test calls the functions beneath them (`evaluate`, `render_markdown`) directly and none
+calls a `main()`, so coverage shows every line of all five unexecuted: argument parsing, dataset
+resolution, `--out` writing and the `--cost-*` flags would not fail a test run if they broke.
+`cluster` was run by hand twice for this sync and reproduces `reports/cluster.md` byte-for-byte.
+The other four were last run by hand at the previous sync: `baseline` and `features` reproduced
+their committed reports byte-for-byte, `model` reproduced across repeated runs, and `blocking`
+matched except its wall-clock build/query columns, which drift run to run by nature. Those are
+checks made once, not guards.
 
 `data/__init__.py`'s `DATASETS` registry and `load_dataset()` were the long-standing untested gap
 — exercised only by the CLIs, so a break would not have failed a test run — and
@@ -74,17 +100,19 @@ and a directory absent because `data/` is gitignored), plus a check that walks t
 asserting no module outside `data/` imports a loader. That last one guards the rule rather than the
 plumbing, and a stage added later inherits it by existing.
 
-The remaining directories — `cluster/`, `synth/`, `service/` — are still bare scaffolding: each
-holds only an `__init__.py` whose entire content is a docstring, and no modules.
+The remaining directories — `synth/` and `service/` — are still bare scaffolding: each holds only
+an `__init__.py` whose entire content is a docstring, and no modules.
 
-Next is **`cluster/`**, because it is the only unbuilt pipeline stage whose input now has data
-flowing through it. `model/` produces calibrated probabilities and an auto-merge band on Abt-Buy,
-and that band is the edge set a connected-components pass consumes; `entity_id` supplies the ground
-truth B-cubed scores against. `model/` has no persistence yet, so `cluster/` has to train and score
-in-process — enough to evaluate on, though `service/` will need a saved artifact. `service/`
-cannot be evaluated before `cluster/` exists, since it serves entities rather than pairs. `synth/`
-depends on nothing downstream — it produces data rather than consuming it — so it can move in
-parallel.
+Next is **`synth/`**. `service/` is no longer blocked on data — it serves entities, and `cluster/`
+now produces them — but it needs two things Abt-Buy cannot supply: a persisted `PairScorer`
+(`cluster/` still trains and scores in-process, as `model/` does) and evidence for the choices it
+would freeze. Four recorded decisions below are explicitly waiting on `synth/`: the 20 : 2 : 1 cost
+ratio, Platt over isotonic, the blockers that add nothing (LSH measured only with token shingles),
+and whether pricing unemitted pairs at p = 0 under-merges entities larger than Abt-Buy's twos and
+threes. Building the service first would bake all four in. Separately, the two fusions that survive
+correlation clustering on Abt-Buy — Weber 3780001 / 3880001 and Samsung YP-S2ZG / YP-S2ZW,
+near-identical variant codes the model scores ≥ 0.98 across entities — are an `error-analyst` pass
+over `model/` and `features/`, independent of both.
 
 `model/` answered the comparison the project is built around: **test F1 0.8934** against the
 baseline's 0.5204, at a threshold chosen on train and spent on test. Read `reports/model.md` before
@@ -127,6 +155,19 @@ settled against more data rather than treated as decided:
   and `12MP` as model numbers while deliberately omitting `wh` and `a`, which collide with real
   vendor codes (Bose 161WH, HP Officejet 8500A). A false model number fuses unrelated products into
   one block; a missing one only loses a signal — so the list should grow only against evidence.
+- **A review is charged per pair, not per cluster merge.** Pricing every pair a partition leaves
+  apart at min(p·C_fs, C_review) keeps the clustering objective additive and bills clusters on
+  exactly the terms `reports/model.md` bills its bands on, which is what makes `reports/cluster.md`'s
+  155 comparable with the bands' 265. But a reviewer shown a proposed merge of two clusters makes
+  one decision, not |A|·|B| of them, so per-pair billing overstates review for large clusters and
+  under-queues their merges. On Abt-Buy's twos and threes the two readings barely differ. The
+  under-queueing is measured, not hypothetical: on a triangle with edges 1.0, 1.0 and 0.91, both
+  cost-based clusterers merge the 0.91 pair the bands route to review, because splitting the third
+  record off leaves both its pairs apart at one review each (2.0) against one merge at
+  (1 - 0.91)·20 = 1.8, so any closing edge above 0.90 merges. Billed as one merge decision it
+  would cost one review and be queued. Neither cost-based row merges such a pair on the Abt-Buy
+  test split, and no test pins the case. Settle it with `service/`'s review queue: measured time
+  per merge decision against cluster size.
 
 Settled by measurement, recorded so it is not re-litigated:
 
@@ -253,6 +294,24 @@ Settled by measurement, recorded so it is not re-litigated:
   whole middle — so `C_fm` anywhere in 10–100 moves the review queue only from 8 pairs to 35. It
   stays a parameter, and `threshold.py` rejects an empty band: 20 : 1 : 1 gives `p_lo` 1.0 against
   `p_hi` 0.95. Revisit when `synth/` populates the middle.
+- **Clusters keep the bands' three outcomes: a partition merges only where merging beats both
+  review and rejection.** The obvious clusterer is connected components over `p_hi` edges, and on
+  the Abt-Buy test split it chains: 4 fused clusters through 11 implied pairs, realized cost 420.
+  The first fix weighed merge against split alone, which breaks even at τ = C_fm / (C_fm + C_fs),
+  0.9091 — but τ always lies inside the review band, so it auto-merged pairs the bands price as
+  cheaper to review; the `er-invariants` audit caught it before commit. Pricing each pair a
+  partition leaves apart at min(p·C_fs, C_review) instead makes a lone pair merge exactly at
+  `p_hi`, and average linkage on that objective bills 155 against the bands' own 265, with B³ P
+  0.9880 → 0.9985 for R 0.9054 → 0.8978 and 23 pairs queued. Revisit on `synth/`, where p = 0 for
+  unemitted pairs may under-merge entities larger than Abt-Buy's twos and threes.
+- **A lower expected cost did not buy a better partition, because the scorer bounds the
+  objective.** Correlation clustering finds expected cost 159.8 against average linkage's 160.5,
+  yet bills 194 against 155: it re-fuses the Weber 3780001 / 3880001 grills, whose cross-entity
+  pairs the model scores 0.98–0.99, so under the model fused *is* cheaper — average linkage
+  separates them by merge order, not by the objective. The true partition costs 1,235.1 in
+  expectation, because merging the true pairs the model rejects is priced as false merges, so no
+  search over this objective reaches the ceiling. Neither clusterer is deleted, and `service/` has
+  not picked one. Revisit when an `error-analyst` pass changes the scorer, or on `synth/`.
 
 ## What this is
 
@@ -335,7 +394,8 @@ src/dedup/
                   vectorize (PairFeaturizer: fit on train, transform anywhere) + evaluate
   model/          train (PairScorer + prepare), calibrate (out-of-fold Platt), threshold (cost
                   model), evaluate — the CLI behind reports/model.md
-  cluster/        components, correlation, agglomerative, bcubed
+  cluster/        base (ScoredGraph + the expected-cost objective), bcubed, components,
+                  agglomerative, correlation + evaluate — the CLI behind reports/cluster.md
   synth/          corruption engine for synthetic scale-up
   service/        FastAPI app, HNSW + inverted index, review queue
 reports/          blocking table, PR curves, cost curves — the defensible results
@@ -344,6 +404,7 @@ reports/          blocking table, PR curves, cost curves — the defensible resu
   features.md         per-column coverage, PR-AUC and class separation; not comparable to the
                       baseline's numbers, which are computed over the full N^2 triangle
   model.md            the F1 against the baseline, calibration quality, and the three bands
+  cluster.md          B-cubed per clusterer, chaining shown by name, and what each fix undid
 ```
 
 `eval/metrics.py` is where the metric invariants below are actually enforced, so a new stage should
@@ -440,7 +501,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (346 passing, 1 skipped)
+pytest                                  # all (477 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -464,16 +525,23 @@ python -m dedup.features.evaluate --dataset abt-buy --out reports/features.md
 # the model: F1 against the baseline, calibration quality, cost-derived bands
 # --cost-false-merge / --cost-false-split / --cost-review override the 20 : 2 : 1 default
 python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md
+
+# clusters: B-cubed per clusterer, the chaining demonstration, what each fix undid
+# --restarts sets correlation clustering's pivot orders; --cost-* as for the model
+python -m dedup.cluster.evaluate --dataset abt-buy --out reports/cluster.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Twenty-one tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
+Thirty-two tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
 integration test in `tests/test_data_abt_buy.py`, one in `tests/test_eval_baseline.py` that
 re-derives the published baseline F1, one in `tests/test_blocking_evaluate.py` that re-derives the
 published union pair completeness, four in `tests/test_features_evaluate.py` that re-derive the
-per-split blocking ceiling and the feature ranking, and fourteen in `tests/test_model_evaluate.py`
+per-split blocking ceiling and the feature ranking, fourteen in `tests/test_model_evaluate.py`
 that re-derive the headline F1, the calibration properties, the band shape and the blocking-loss
-accounting. So a green run does *not* by itself mean the real files were checked, and in
+accounting, and eleven in `tests/test_cluster_evaluate.py` that re-derive the components B-cubed
+measured while planning the stage, the floor and ceiling, the chaining demonstration, the
+objective-against-truth result, and that merging nothing bills exactly what the model report's
+bands route. So a green run does *not* by itself mean the real files were checked, and in
 particular does not mean any published number was reproduced — `pytest -rs` reports the skips.
 
 One more test skips for a different reason and is not about the benchmark: the
@@ -490,9 +558,6 @@ python tests/fixtures/make_fixtures.py
 Not built yet — intended contract, will fail if invoked:
 
 ```bash
-# pipeline stages
-python -m dedup.cluster.evaluate
-
 # service
 uvicorn dedup.service.app:app --reload
 ```
@@ -514,7 +579,7 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`, `eval`, `features`, `model`. Reserved for modules not yet built: `cluster`, `service`,
+`blocking`, `eval`, `features`, `model`, `cluster`. Reserved for modules not yet built: `service`,
 `data-gen`. A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:

@@ -129,8 +129,9 @@ class BandAssignment:
     """Boolean masks over the scored pairs, one per band.
 
     Masks rather than a label array because every consumer wants a selection:
-    `cluster/` takes the auto-merge edges, the review queue takes its own band,
-    and the report counts all three.
+    `cluster/` starts from the auto-merge edges and returns every pair it leaves
+    apart to its band, the review queue takes its own band, and the report counts
+    all three.
     """
 
     auto_merge: np.ndarray
