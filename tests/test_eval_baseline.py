@@ -12,15 +12,19 @@ not been downloaded, matching tests/test_data_abt_buy.py.
 
 import random
 import string
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from dedup.data import DATASETS
 from dedup.data.abt_buy import load_abt_buy
 from dedup.eval.baseline import (
     comparison_text,
     fit_vectorizer,
+    floor_caveat,
+    read_baseline_row,
     render_markdown,
     run_baseline,
     run_variant,
@@ -31,6 +35,7 @@ from dedup.schema import Record
 
 FIXTURES = Path(__file__).parent / "fixtures" / "abt-buy"
 REAL_DATA = Path(__file__).parent.parent / "data" / "raw" / "abt-buy"
+BASELINE_REPORT = Path(__file__).parent.parent / "reports" / "baseline_tfidf.md"
 
 # The F1 this baseline scored on the real benchmark when reports/baseline_tfidf.md
 # was generated. Held as a band, not an exact value -- sklearn's tokenizer and
@@ -269,6 +274,114 @@ def test_render_markdown_states_the_protocol_and_the_caveats():
     assert "Oracle F1" in markdown
     assert "fit on the train split" in markdown
     assert "| title |" in markdown
+
+
+def test_without_notes_the_framing_names_no_benchmark():
+    markdown = render_markdown(run_baseline(make_pairs(60), dataset="synthetic", seed=0))
+    assert "deduplication framing" in markdown
+    for claim in ("Abt", "1097", "size-3"):
+        assert claim not in markdown
+
+
+def test_the_datasets_own_framing_is_printed_with_its_counts():
+    report = run_baseline(make_pairs(60), dataset="abt-buy", seed=0)
+    markdown = " ".join(render_markdown(report, notes=DATASETS["abt-buy"].notes).split())
+    assert "Published Abt-Buy F1 figures" in markdown
+    assert f"makes {report.n_true_pairs} pairs true here" in markdown
+
+
+def test_the_regenerate_command_names_a_raised_floor_and_the_out_path():
+    report = run_baseline(make_pairs(60), dataset="synthetic", seed=0, min_similarity=0.2)
+    markdown = render_markdown(report, out="reports/synth/baseline_tfidf.md")
+    assert (
+        "--dataset synthetic --min-similarity 0.2 --out reports/synth/baseline_tfidf.md" in markdown
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reading a committed baseline back -- how model/ and features/ quote it
+# ---------------------------------------------------------------------------
+
+
+def test_the_committed_baseline_row_parses_to_its_published_values():
+    row = read_baseline_row(BASELINE_REPORT, dataset="abt-buy")
+    assert (row.f1, row.precision, row.recall, row.pr_auc) == (0.5204, 0.4605, 0.5982, 0.4720)
+    assert row.precision_at_k == {10: 0.600, 100: 0.620}
+    assert (row.r_precision, row.threshold, row.oracle_f1) == (0.504, 0.6243, 0.5249)
+    assert (row.min_similarity, row.recall_ceiling) == (0.0, 1.0)
+    assert floor_caveat(row) is None
+
+
+def test_another_datasets_baseline_is_refused():
+    """Both numbers would be well-formed; only the dataset line says they are not comparable."""
+    with pytest.raises(ValueError, match="not a comparison"):
+        read_baseline_row(BASELINE_REPORT, dataset="synth-20k")
+
+
+def test_a_rendered_report_round_trips_through_the_parser(tmp_path):
+    report = run_baseline(make_pairs(60), dataset="synthetic", seed=0)
+    path = tmp_path / "baseline.md"
+    path.write_text(render_markdown(report), encoding="utf-8")
+
+    row = read_baseline_row(path, dataset="synthetic")
+    variant = report.variants[0]
+    assert row.f1 == pytest.approx(variant.test_point.f1, abs=5e-5)
+    assert row.pr_auc == pytest.approx(variant.test_pr_auc, abs=5e-5)
+    assert row.threshold == pytest.approx(variant.train_point.threshold, abs=5e-5)
+    assert row.min_similarity == 0.0
+
+
+def test_a_floored_baseline_row_carries_its_floor_and_what_it_cost(tmp_path):
+    """Audit finding: a floored row quoted without its floor overstates its reach."""
+    report = run_baseline(make_pairs(60), dataset="synthetic", seed=0, min_similarity=0.2)
+    path = tmp_path / "floored.md"
+    path.write_text(render_markdown(report), encoding="utf-8")
+
+    row = read_baseline_row(path, dataset="synthetic")
+    assert row.min_similarity == 0.2
+    assert row.recall_ceiling == pytest.approx(report.variants[0].recall_ceiling, abs=5e-5)
+    assert "similarity floor of 0.2" in floor_caveat(row)
+
+
+def test_a_file_that_is_not_a_baseline_report_is_refused(tmp_path):
+    path = tmp_path / "other.md"
+    path.write_text("# Something else\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="names no dataset"):
+        read_baseline_row(path, dataset="synthetic")
+
+
+# ---------------------------------------------------------------------------
+# Measured claims stay measured -- both were printed unconditionally until a
+# synthetic catalog measured the opposite of each
+# ---------------------------------------------------------------------------
+
+
+def test_a_train_f1_above_test_is_not_explained_away():
+    """The below-test explanation holds on Abt-Buy; synth-20k measures the opposite."""
+    report = run_baseline(make_pairs(60), dataset="synthetic", seed=0)
+    variant = report.variants[0]
+
+    def rendered_with_train_f1(f1):
+        moved = replace(variant, train_point=replace(variant.train_point, f1=f1))
+        text = render_markdown(replace(report, variants=[moved, *report.variants[1:]]))
+        return " ".join(text.split())
+
+    below = rendered_with_train_f1(variant.test_point.f1 - 0.1)
+    above = rendered_with_train_f1(variant.test_point.f1 + 0.1)
+    assert "comes out *below* test F1, and that is not a bug" in below
+    assert "comes out *above* test F1 on this catalog" in above
+    assert "that is not a bug" not in above
+
+
+def test_a_raised_floor_is_not_described_as_scoring_with_no_ceiling():
+    def flat_report(**kwargs):
+        report = run_baseline(make_pairs(60), dataset="synthetic", seed=0, **kwargs)
+        return " ".join(render_markdown(report).split())
+
+    floored = flat_report(min_similarity=0.2)
+    assert "with no recall ceiling above it" not in floored
+    assert "No blocking, but a similarity floor" in floored
+    assert "with no recall ceiling above it" in flat_report()
 
 
 # ---------------------------------------------------------------------------

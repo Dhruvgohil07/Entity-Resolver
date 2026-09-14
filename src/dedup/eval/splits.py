@@ -11,6 +11,15 @@ The consequence downstream: a pair can only be formed inside one split.
 Cross-split pairs are all negatives by construction (their entities differ
 because the entities were assigned to different sides), so dropping them
 loses no positives and costs only a small, uniform number of easy negatives.
+
+The same leak has a second level, and `Record.split_group` closes it. Two
+*distinct* entities can share source text -- `synth/` derives sibling products
+and their duplicates from one seed listing -- and splitting those siblings
+across train and test scores a test entity against training records built from
+the same title. Records sharing a `split_group` therefore move as one unit.
+Every benchmark loader leaves the field unset, and for such records the units
+are exactly the entities, in exactly the order they had before the field
+existed, so no committed split moves.
 """
 
 from __future__ import annotations
@@ -21,6 +30,13 @@ from itertools import combinations
 import numpy as np
 
 from dedup.schema import Record
+
+# The split every report CLI scores on when no flag says otherwise. Named because
+# more than the splitter depends on it: synthetic catalogs are seeded from its
+# train side, and a catalog seeded from any other split could hold records these
+# reports test on.
+DEFAULT_TEST_FRACTION = 0.3
+DEFAULT_SEED = 0
 
 
 def group_by_entity(records: list[Record]) -> dict[str, list[Record]]:
@@ -48,6 +64,35 @@ def group_by_entity(records: list[Record]) -> dict[str, list[Record]]:
     return dict(grouped)
 
 
+def group_for_split(records: list[Record]) -> dict[str, list[Record]]:
+    """Bucket records into the units a split may not cut.
+
+    A unit is a whole entity, or -- when its records carry a `split_group` --
+    every entity in that group. An entity whose records disagree about their
+    group is refused: there is no way to keep both the entity and the groups
+    whole, and silently picking one would cut the other.
+
+    Keys are prefixed by kind, so a `split_group` spelled like some unrelated
+    `entity_id` cannot merge with it. Every entity key shares one prefix, so
+    entity keys sort exactly as the bare entity ids do -- which is what keeps a
+    split over ungrouped records identical to the entity-grouped split this
+    function generalizes.
+    """
+    grouped: dict[str, list[Record]] = defaultdict(list)
+    for entity_id, members in group_by_entity(records).items():
+        groups = {member.split_group for member in members}
+        if len(groups) > 1:
+            raise ValueError(
+                f"entity {entity_id!r} spans more than one split_group "
+                f"({sorted(str(group) for group in groups)}); an entity must sit whole inside "
+                f"one group, or splitting on groups would cut it"
+            )
+        (group,) = groups
+        key = f"entity:{entity_id}" if group is None else f"group:{group}"
+        grouped[key].extend(members)
+    return dict(grouped)
+
+
 def count_true_pairs(records: list[Record]) -> int:
     """Number of same-entity pairs among these records: sum of C(size, 2).
 
@@ -66,35 +111,37 @@ def count_true_pairs(records: list[Record]) -> int:
 def split_by_entity(
     records: list[Record],
     *,
-    test_fraction: float = 0.3,
-    seed: int = 0,
+    test_fraction: float = DEFAULT_TEST_FRACTION,
+    seed: int = DEFAULT_SEED,
 ) -> tuple[list[Record], list[Record]]:
     """Partition records into (train, test) so no entity spans both sides.
 
-    Entities are shuffled and taken into test until the test side holds at
-    least `test_fraction` of the records; whole entities move together, so
-    the realized fraction lands near the target rather than on it. Entity ids
-    are sorted before shuffling so the split depends only on `seed` and the
-    set of entities -- not on the order the loader happened to return rows in.
+    Units -- entities, or split groups where records carry one -- are shuffled
+    and taken into test until the test side holds at least `test_fraction` of
+    the records; whole units move together, so the realized fraction lands
+    near the target rather than on it. Unit keys are sorted before shuffling so
+    the split depends only on `seed` and the set of units -- not on the order
+    the loader happened to return rows in.
     """
     if not 0 < test_fraction < 1:
         raise ValueError(f"test_fraction must be in (0, 1), got {test_fraction}")
 
-    grouped = group_by_entity(records)
-    entity_ids = sorted(grouped)
-    np.random.default_rng(seed).shuffle(entity_ids)
+    grouped = group_for_split(records)
+    unit_keys = sorted(grouped)
+    np.random.default_rng(seed).shuffle(unit_keys)
 
     target = test_fraction * len(records)
     test: list[Record] = []
     train: list[Record] = []
-    for entity_id in entity_ids:
+    for key in unit_keys:
         destination = test if len(test) < target else train
-        destination.extend(grouped[entity_id])
+        destination.extend(grouped[key])
 
     if not train or not test:
         raise ValueError(
             f"split produced an empty side ({len(train)} train, {len(test)} test) from "
-            f"{len(grouped)} entities -- too few entities for test_fraction={test_fraction}"
+            f"{len(grouped)} units -- too few entities or split groups for "
+            f"test_fraction={test_fraction}"
         )
     return train, test
 
@@ -120,31 +167,32 @@ def kfold_by_entity(
 ) -> list[list[Record]]:
     """Partition records into `n_folds` parts so no entity spans two of them.
 
-    The same rule as `split_by_entity`, applied K ways: whole entities move
-    together, so a fold's records can be blocked and scored as a self-contained
-    catalog. That is what makes out-of-fold calibration honest -- a model
-    scoring fold k has seen no record of any entity in fold k, so its
-    predictions there carry the same optimism as predictions on unseen data.
+    The same rule as `split_by_entity`, applied K ways: whole units (entities,
+    or split groups) move together, so a fold's records can be blocked and
+    scored as a self-contained catalog. That is what makes out-of-fold
+    calibration honest -- a model scoring fold k has seen no record of any
+    entity in fold k, so its predictions there carry the same optimism as
+    predictions on unseen data.
 
-    Entities are dealt round-robin over the folds after shuffling rather than
+    Units are dealt round-robin over the folds after shuffling rather than
     sliced into K contiguous runs, which keeps the fold sizes close even when
-    cluster sizes vary. As in `split_by_entity`, ids are sorted before
-    shuffling so the result depends only on `seed` and the set of entities,
-    never on the order the loader returned rows in.
+    cluster sizes vary. As in `split_by_entity`, keys are sorted before
+    shuffling so the result depends only on `seed` and the set of units, never
+    on the order the loader returned rows in.
     """
     if n_folds < 2:
         raise ValueError(f"n_folds must be at least 2, got {n_folds}")
 
-    grouped = group_by_entity(records)
-    entity_ids = sorted(grouped)
-    if len(entity_ids) < n_folds:
+    grouped = group_for_split(records)
+    unit_keys = sorted(grouped)
+    if len(unit_keys) < n_folds:
         raise ValueError(
-            f"cannot build {n_folds} folds from {len(entity_ids)} entities -- "
+            f"cannot build {n_folds} folds from {len(unit_keys)} entities or split groups -- "
             f"every fold must hold at least one entity"
         )
-    np.random.default_rng(seed).shuffle(entity_ids)
+    np.random.default_rng(seed).shuffle(unit_keys)
 
     folds: list[list[Record]] = [[] for _ in range(n_folds)]
-    for position, entity_id in enumerate(entity_ids):
-        folds[position % n_folds].extend(grouped[entity_id])
+    for position, key in enumerate(unit_keys):
+        folds[position % n_folds].extend(grouped[key])
     return folds

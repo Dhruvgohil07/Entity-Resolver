@@ -27,6 +27,7 @@ demonstrated rather than asserted once `synth/` lands.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,7 @@ from pathlib import Path
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from dedup.data import DATASETS, load_dataset
+from dedup.data import DATASETS, NO_NOTES, DatasetNotes, load_dataset
 from dedup.eval.metrics import (
     ThresholdPoint,
     average_precision,
@@ -64,6 +65,17 @@ DEFAULT_MIN_SIMILARITY = 0.0
 
 DEFAULT_CHUNK_SIZE = 512
 PRECISION_AT_K = (10, 100)
+DEFAULT_OUT = "reports/baseline_tfidf.md"
+
+# The passage here that makes a dataset-specific claim, and the generic text it
+# prints when a dataset's notes leave it alone (see data/notes.py).
+PASSAGE_SLOTS = frozenset({"baseline.framing"})
+
+_FRAMING = """\
+- **This is the deduplication framing.** Every pair of the {n_records} records is a
+  candidate, and a pair is positive when the two records share an `entity_id`. That makes
+  {n_true_pairs} pairs true here, counted by transitivity: an entity of k records holds
+  C(k, 2) of them."""
 
 
 def comparison_text(record: Record, *, include_description: bool) -> str:
@@ -330,6 +342,110 @@ def run_baseline(
     )
 
 
+@dataclass(frozen=True)
+class BaselineRow:
+    """One variant's results row of a committed baseline report, as a later report quotes it.
+
+    Read from the committed file rather than recomputed -- recomputing means
+    rescoring the full N^2 triangle on every model run -- and rather than copied
+    into the quoting module as constants, so regenerating the baseline cannot
+    leave a stale copy behind and the numbers always belong to the dataset the
+    report names.
+    """
+
+    dataset: str
+    path: str  # posix, as a report cites it
+    f1: float
+    precision: float
+    recall: float
+    pr_auc: float
+    precision_at_k: dict[int, float]
+    r_precision: float
+    threshold: float  # a cosine, not a probability
+    oracle_f1: float
+    min_similarity: float  # pairs at or below this cosine were never scored; 0.0 is no floor
+    recall_ceiling: float  # the most recall this variant could reach given that floor
+
+
+_DATASET_LINE = re.compile(r"^- Dataset: `([^`]+)`", re.MULTILINE)
+_FLOOR_LINE = re.compile(r"^- Similarity floor: (?:none|`([^`]+)`)", re.MULTILINE)
+
+
+def read_baseline_row(path: Path, *, dataset: str, variant: str = "title") -> BaselineRow:
+    """Parse `variant`'s results row out of a report `render_markdown` wrote.
+
+    Refuses a report whose Setup names a different dataset. A model scored
+    against another catalog's baseline yields two well-formed numbers and no
+    comparison, and nothing after this line could tell.
+    """
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    named = _DATASET_LINE.search(text)
+    if named is None:
+        raise ValueError(f"{path} names no dataset, so it is not a baseline report")
+    if named.group(1) != dataset:
+        raise ValueError(
+            f"{path} is the baseline for {named.group(1)!r}, not {dataset!r}; a model scored "
+            f"against another dataset's baseline is not a comparison"
+        )
+    prefix = f"| {variant} |"
+    row = next((line for line in text.splitlines() if line.startswith(prefix)), None)
+    if row is None:
+        raise ValueError(f"{path} has no {variant!r} results row")
+
+    cells = [cell.strip().strip("*") for cell in row.strip().strip("|").split("|")]
+    n_at_k = len(PRECISION_AT_K)
+    if len(cells) != 8 + n_at_k:
+        raise ValueError(
+            f"{path}: the {variant!r} row has {len(cells)} cells, expected {8 + n_at_k}"
+        )
+    _, f1, precision, recall, pr_auc = cells[:5]
+    at_k = cells[5 : 5 + n_at_k]
+    r_precision, threshold, oracle_f1 = cells[5 + n_at_k :]
+
+    floor = _FLOOR_LINE.search(text)
+    if floor is None:
+        raise ValueError(f"{path} states no similarity floor, so its reach cannot be quoted")
+    ceiling = re.search(
+        rf"^- \*\*{re.escape(variant)}\*\* — .*recall ceiling ([0-9.]+)\)", text, re.MULTILINE
+    )
+    if ceiling is None:
+        raise ValueError(f"{path} states no recall ceiling for {variant!r}")
+    return BaselineRow(
+        dataset=dataset,
+        path=path.as_posix(),
+        min_similarity=float(floor.group(1)) if floor.group(1) else 0.0,
+        recall_ceiling=float(ceiling.group(1)),
+        f1=float(f1),
+        precision=float(precision),
+        recall=float(recall),
+        pr_auc=float(pr_auc),
+        precision_at_k={k: float(value) for k, value in zip(PRECISION_AT_K, at_k)},
+        r_precision=float(r_precision),
+        threshold=float(threshold),
+        oracle_f1=float(oracle_f1),
+    )
+
+
+def registered_baseline(notes: DatasetNotes, dataset: str) -> BaselineRow | None:
+    """The baseline a dataset's notes register, or None when it has none yet.
+
+    A registered report that does not exist warns instead of raising: a report
+    on a catalog whose baseline has not been run is still a report, and it says
+    that it compares against nothing.
+    """
+    if notes.baseline_report is None:
+        return None
+    if not notes.baseline_report.is_file():
+        print(
+            f"warning: {notes.baseline_report.as_posix()} not found; reporting without a "
+            f"baseline",
+            file=sys.stderr,
+        )
+        return None
+    return read_baseline_row(notes.baseline_report, dataset=dataset)
+
+
 def _results_row(variant: VariantResult) -> str:
     at_k = " | ".join(f"{variant.test_precision_at_k[k]:.3f}" for k in PRECISION_AT_K)
     return (
@@ -355,8 +471,83 @@ def _variant_detail(variant: VariantResult, n_test_all_pairs: int) -> str:
     )
 
 
-def render_markdown(report: BaselineReport) -> str:
-    """The reports/ artifact: numbers plus the caveats that make them readable."""
+def floor_caveat(row: BaselineRow) -> str | None:
+    """What a raised similarity floor did to a quoted baseline row, or None without one.
+
+    The floor discards pairs before scoring, so the row's reach stops at its recall
+    ceiling. Figures at the train-chosen threshold are still exact when that
+    threshold sits above the floor -- no discarded pair could have passed it -- but
+    PR-AUC is integrated only up to the ceiling, so it is a lower bound.
+    """
+    if row.min_similarity <= DEFAULT_MIN_SIMILARITY:
+        return None
+    if row.threshold > row.min_similarity:
+        exact = (
+            f"Its F1, precision and recall are exact — the train-chosen threshold "
+            f"{row.threshold:.4f} sits above the floor, so no discarded pair could have passed "
+            f"it — but its PR-AUC ends at that ceiling and is a lower bound."
+        )
+    else:
+        exact = (
+            f"Its train-chosen threshold {row.threshold:.4f} sits at or below the floor, so every "
+            f"figure in the row is a lower bound."
+        )
+    return (
+        f"**The baseline row was scored above a similarity floor of {row.min_similarity:g}.** "
+        f"Pairs at or below that cosine were never scored, so the baseline reaches recall "
+        f"{row.recall_ceiling:.4f} at most rather than the full triangle's. {exact}"
+    )
+
+
+def _threshold_transfer_bullet(report: BaselineReport, size_ratio: float) -> str:
+    """Whether train F1 lands below test F1 is measured per catalog, never asserted.
+
+    On Abt-Buy it lands below, for the reason the first branch gives. On synth-20k
+    it lands above, and printing the Abt-Buy explanation there would explain away
+    a gap that does not exist.
+    """
+    variant = report.variants[0]
+    if variant.train_point.f1 < variant.test_point.f1:
+        return f"""- **Train F1 comes out *below* test F1, and that is not a bug.** The train side holds
+  {report.n_train_all_pairs:,} pairs against test's {report.n_test_all_pairs:,} — {size_ratio:.1f}x as many —
+  while true pairs grow only linearly with records. At a fixed cosine threshold the false
+  positives scale with the pair count and the true positives do not, so precision, and
+  with it F1, falls as the catalog grows. A single global threshold therefore does not
+  transfer across catalog sizes; the gap between the train-chosen threshold and the test
+  oracle above shows how little that cost here, but on a 200k-record `synth/` catalog it
+  is the whole problem."""
+    return f"""- **Train F1 comes out *above* test F1 on this catalog** ({variant.train_point.f1:.4f} against
+  {variant.test_point.f1:.4f}), although the train side holds {report.n_train_all_pairs:,} pairs against
+  test's {report.n_test_all_pairs:,} — {size_ratio:.1f}x as many. A fixed cosine threshold's false positives
+  scale with the pair count and its true positives do not, which on its own pushes the larger
+  side's precision down; here that size effect did not dominate. A single global threshold
+  still does not transfer across catalog sizes, and the oracle column above measures what it
+  left on the table on this split."""
+
+
+def _scope_bullet(report: BaselineReport) -> str:
+    """"No recall ceiling" is only true when no similarity floor was raised."""
+    if report.min_similarity <= DEFAULT_MIN_SIMILARITY:
+        return """- **No blocking.** Scoring is the full upper triangle, so this measures the similarity
+  function with no recall ceiling above it. That is what makes it the right reference for
+  `blocking/` — and why it will not scale to `synth/`."""
+    ceiling = report.variants[0].recall_ceiling
+    return f"""- **No blocking, but a similarity floor.** Scoring covers the full upper triangle, but pairs at
+  or below cosine {report.min_similarity} were discarded to fit in memory, so the title variant is
+  measured under a recall ceiling of {ceiling:.4f} rather than none. Recall still divides by every
+  true pair, so the floor shows as lost recall — compare `blocking/` against this with that
+  ceiling in mind."""
+
+
+def render_markdown(
+    report: BaselineReport, *, notes: DatasetNotes = NO_NOTES, out: str = DEFAULT_OUT
+) -> str:
+    """The reports/ artifact: numbers plus the caveats that make them readable.
+
+    `notes` may replace the framing passage with the dataset's own, and `out` is
+    the path the regenerate command names, so a report written anywhere
+    reproduces itself instead of pointing at another dataset's file.
+    """
     low, high = report.ngram_range
     imbalance = report.n_test_all_pairs / max(report.n_test_true_pairs, 1)
     size_ratio = report.n_train_all_pairs / max(report.n_test_all_pairs, 1)
@@ -369,6 +560,19 @@ def render_markdown(report: BaselineReport) -> str:
         if report.min_similarity <= 0
         else f"`{report.min_similarity}` — pairs at or below it are discarded unscored"
     )
+    floor_flag = (
+        ""
+        if report.min_similarity == DEFAULT_MIN_SIMILARITY
+        else f" --min-similarity {report.min_similarity}"
+    )
+    transfer = _threshold_transfer_bullet(report, size_ratio)
+    scope = _scope_bullet(report)
+    framing = notes.passage(
+        "baseline.framing",
+        _FRAMING,
+        n_records=report.n_records,
+        n_true_pairs=report.n_true_pairs,
+    )
 
     return f"""# Baseline: TF-IDF char-3gram cosine
 
@@ -379,7 +583,7 @@ cosine, one threshold.
 Regenerate with:
 
 ```bash
-python -m dedup.eval.baseline --dataset {report.dataset} --out reports/baseline_tfidf.md
+python -m dedup.eval.baseline --dataset {report.dataset}{floor_flag} --out {out}
 ```
 
 ## Setup
@@ -416,29 +620,14 @@ Per-variant detail:
 
 ## Reading this honestly
 
-- **This is the deduplication framing, not the record-linkage one.** Every pair of the
-  {report.n_records} records is a candidate, and a pair is positive when the two records
-  share an `entity_id`. Published Abt-Buy F1 figures are for the cross-source task — Abt
-  row against Buy row only — over the 1097 shipped pairs. Transitivity through the size-3
-  clusters makes {report.n_true_pairs} pairs true here, and same-side pairs are in the
-  candidate set. Close to the published task, not identical to it; compare accordingly.
+{framing}
 - **PR-AUC, not ROC-AUC.** At 1 positive per {imbalance:,.0f} pairs, ROC-AUC reads ~0.99
   for a model with no practical value.
-- **Train F1 comes out *below* test F1, and that is not a bug.** The train side holds
-  {report.n_train_all_pairs:,} pairs against test's {report.n_test_all_pairs:,} — \
-{size_ratio:.1f}x as many —
-  while true pairs grow only linearly with records. At a fixed cosine threshold the false
-  positives scale with the pair count and the true positives do not, so precision, and
-  with it F1, falls as the catalog grows. A single global threshold therefore does not
-  transfer across catalog sizes; the gap between the train-chosen threshold and the test
-  oracle above shows how little that cost here, but on a 200k-record `synth/` catalog it
-  is the whole problem.
+{transfer}
 - **Best-F1 thresholds are a baseline convention, not the plan.** The real thresholds come
   from expected cost, because a false merge corrupts the catalog and a false split merely
   leaves a duplicate (CLAUDE.md, Invariants).
-- **No blocking.** Scoring is the full upper triangle, so this measures the similarity
-  function with no recall ceiling above it. That is what makes it the right reference for
-  `blocking/` — and why it will not scale to `synth/`.
+{scope}
 """
 
 
@@ -460,7 +649,11 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         min_similarity=args.min_similarity,
     )
-    markdown = render_markdown(report)
+    markdown = render_markdown(
+        report,
+        notes=DATASETS[args.dataset].notes,
+        out=DEFAULT_OUT if args.out is None else args.out.as_posix(),
+    )
     print(markdown)
 
     if args.out is not None:

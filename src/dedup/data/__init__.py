@@ -14,6 +14,11 @@ dataset ("--dataset abt-buy") resolves it here and passes `Record` objects
 onward, so `eval/`, `blocking/` and `model/` never import a loader module or
 learn a benchmark's name -- CLAUDE.md's rule that `data/` is the only place
 that may know one.
+
+`DatasetSpec.notes` carries the same rule into the reports. What a report may
+say about a dataset -- that it is pre-blocked, what its baseline scored, why a
+column points backwards on it -- lives with the dataset here, and the
+renderers print it without knowing whose it is (see `notes.py`).
 """
 
 from __future__ import annotations
@@ -23,16 +28,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dedup.data.abt_buy import load_abt_buy
+from dedup.data.abt_buy_notes import NOTES as ABT_BUY_NOTES
+from dedup.data.notes import NO_NOTES, DatasetNotes
+from dedup.data.synthetic import NOTES_20K, NOTES_200K, load_synthetic
 from dedup.schema import Record
 
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    """A loader plus where its files live when nobody says otherwise."""
+    """A loader, where its files live when nobody says otherwise, and its report notes."""
 
     name: str
     default_root: Path
     load: Callable[[Path], list[Record]]
+    notes: DatasetNotes = NO_NOTES
 
 
 DATASETS: dict[str, DatasetSpec] = {
@@ -43,6 +52,23 @@ DATASETS: dict[str, DatasetSpec] = {
         # empty in a fresh clone and `load_dataset` says so plainly.
         default_root=Path("data/raw/abt-buy"),
         load=load_abt_buy,
+        notes=ABT_BUY_NOTES,
+    ),
+    # Synthetic catalogs derived from Abt-Buy's train split by synth/, written by
+    # `python -m dedup.synth.generate --records <n> --out <root>`. Gitignored like
+    # every other dataset under data/, and refused by the loader if they no longer
+    # match their manifest.
+    "synth-20k": DatasetSpec(
+        name="synth-20k",
+        default_root=Path("data/synth/abt-buy-train-20k"),
+        load=load_synthetic,
+        notes=NOTES_20K,
+    ),
+    "synth-200k": DatasetSpec(
+        name="synth-200k",
+        default_root=Path("data/synth/abt-buy-train-200k"),
+        load=load_synthetic,
+        notes=NOTES_200K,
     ),
 }
 
@@ -63,4 +89,4 @@ def load_dataset(name: str, root: Path | None = None) -> list[Record]:
     return spec.load(root)
 
 
-__all__ = ["DATASETS", "DatasetSpec", "load_dataset"]
+__all__ = ["DATASETS", "NO_NOTES", "DatasetNotes", "DatasetSpec", "load_dataset"]

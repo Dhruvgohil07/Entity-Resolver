@@ -17,10 +17,17 @@ from pathlib import Path
 
 import pytest
 
+from dedup.blocking.evaluate import PASSAGE_SLOTS as BLOCKING_SLOTS
 from dedup.data import DATASETS, DatasetSpec, load_dataset
+from dedup.eval.baseline import PASSAGE_SLOTS as BASELINE_SLOTS
+from dedup.eval.baseline import read_baseline_row
+from dedup.features.evaluate import PASSAGE_SLOTS as FEATURE_SLOTS
+from dedup.features.vectorize import PairFeaturizer
+from dedup.model.evaluate import GAIN_COLUMN_SLOT
 
 FIXTURES = Path(__file__).parent / "fixtures" / "abt-buy"
-SOURCE_ROOT = Path(__file__).parent.parent / "src" / "dedup"
+REPO_ROOT = Path(__file__).parent.parent
+SOURCE_ROOT = REPO_ROOT / "src" / "dedup"
 
 
 def test_every_registered_spec_is_self_consistent():
@@ -93,3 +100,37 @@ def test_the_registry_is_the_only_place_a_dataset_name_appears():
     assert not offenders, "stages after data/ must not import a dataset loader:\n" + "\n".join(
         offenders
     )
+
+
+# ---------------------------------------------------------------------------
+# Report notes -- what a report may say about a dataset lives with the dataset
+# ---------------------------------------------------------------------------
+
+
+def test_every_registered_passage_names_a_slot_a_renderer_declares():
+    """A misspelled slot would print the generic text instead, silently.
+
+    The report would lose the dataset's caveat -- "pre-blocked", say -- and no
+    error would name the cause.
+    """
+    columns = set(PairFeaturizer(include_semantic=True).names)
+    known = BASELINE_SLOTS | BLOCKING_SLOTS | FEATURE_SLOTS
+    for name, spec in DATASETS.items():
+        for slot in spec.notes.passages:
+            if slot.startswith(GAIN_COLUMN_SLOT):
+                assert slot.removeprefix(GAIN_COLUMN_SLOT) in columns, f"{name}: {slot}"
+            else:
+                assert slot in known, f"{name}: no renderer declares slot {slot!r}"
+
+
+def test_a_registered_baseline_report_belongs_to_its_dataset():
+    for name, spec in DATASETS.items():
+        path = spec.notes.baseline_report
+        if path is not None and (REPO_ROOT / path).is_file():
+            assert read_baseline_row(REPO_ROOT / path, dataset=name).dataset == name
+
+
+def test_abt_buy_carries_its_own_caveats():
+    passages = DATASETS["abt-buy"].notes.passages
+    assert "pre-blocked" in passages["blocking.provenance"]
+    assert "Buy against Buy" in passages["features.wrong_way"]

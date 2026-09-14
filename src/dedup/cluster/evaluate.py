@@ -41,7 +41,7 @@ import textwrap
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -89,6 +89,7 @@ SEPARATED_WITH_SPLIT = "separated, but split an entity"
 STILL_FUSED = "still fused"
 
 MAX_FUSED_LISTED = 10
+DEFAULT_OUT = "reports/cluster.md"
 
 # A singleton floor at or above this B-cubed F1 gets the note that B-cubed
 # flatters doing nothing here; below it, the note says the opposite.
@@ -466,7 +467,7 @@ def _fused_section(report: ClusterReport) -> str:
     return "\n\n".join([intro, *blocks])
 
 
-def _reading_notes(report: ClusterReport) -> list[str]:
+def _reading_notes(report: ClusterReport, report_dir: str = "reports") -> list[str]:
     """The "Reading this honestly" bullets, each chosen from what was measured.
 
     As in `model/evaluate.py`: no interpretive sentence is printed unconditionally,
@@ -637,7 +638,7 @@ def _reading_notes(report: ClusterReport) -> list[str]:
         f"**Review is a third outcome here too, and B-cubed does not see it.** Every pair a "
         f"partition leaves apart falls back to its band — queued for review at p ≥ `p_lo`, "
         f"rejected below — so a lone pair merges only where the bands would auto-merge it, and "
-        f"both cost columns bill on the same terms as `reports/model.md`. The B-cubed figures "
+        f"both cost columns bill on the same terms as `{report_dir}/model.md`. The B-cubed figures "
         f"score the partition before any review is resolved: connected components at `p_hi` "
         f"leaves {_plural(hi.n_review, 'pair')} queued, average linkage "
         f"{_plural(linkage.n_review, 'pair')}."
@@ -659,23 +660,28 @@ def _reading_notes(report: ClusterReport) -> list[str]:
     return [_bullet(note) for note in notes]
 
 
-def render_markdown(report: ClusterReport) -> str:
-    """The reports/ artifact: the numbers, plus what makes them readable."""
+def render_markdown(report: ClusterReport, *, out: str = DEFAULT_OUT) -> str:
+    """The reports/ artifact: the numbers, plus what makes them readable.
+
+    Cross-references resolve against `out`'s directory, so a cluster report on
+    another catalog points at that catalog's model report, not Abt-Buy's.
+    """
+    report_dir = PurePosixPath(out).parent.as_posix()
     cost = report.cost
     table = "\n".join(_method_row(row) for row in report.rows)
-    notes = "\n".join(_reading_notes(report))
+    notes = "\n".join(_reading_notes(report, report_dir))
     columns = "34" if report.include_semantic else "33"
 
     return f"""# Clusters: entities from the scored pair graph
 
 Pairs become entities here, and the unit of quality changes with them: B-cubed over
 records, reported separately from anything pairwise (CLAUDE.md, Invariants). The
-pairwise figures for the same scorer are in `reports/model.md`.
+pairwise figures for the same scorer are in `{report_dir}/model.md`.
 
 Regenerate with:
 
 ```bash
-python -m dedup.cluster.evaluate --dataset {report.dataset} --out reports/cluster.md
+python -m dedup.cluster.evaluate --dataset {report.dataset} --out {out}
 ```
 
 ## Setup
@@ -684,7 +690,7 @@ python -m dedup.cluster.evaluate --dataset {report.dataset} --out reports/cluste
 {report.n_entities:,} entities, {report.n_true_pairs:,} true pairs. Blocking emitted \
 {report.n_candidates:,} candidate pairs holding {report.n_true_candidates:,} of them.
 - Split: entity-grouped, `test_fraction={report.test_fraction}`, `seed={report.seed}`.
-- Scorer: the `reports/model.md` pipeline rerun in-process — LightGBM over the \
+- Scorer: the `{report_dir}/model.md` pipeline rerun in-process — LightGBM over the \
 {columns}-column pair vector, Platt fit out of fold over {report.n_folds} entity-grouped folds.
 - Cost model: `{cost}`. A pair a partition leaves apart falls back to its band — review at \
 p ≥ `p_lo`, rejection below — so the cost-based methods merge only where that beats both, \
@@ -711,7 +717,7 @@ auto-merge.
 - **E[cost]**: the objective under the model's probabilities, with unemitted pairs at p = 0. \
 **cost**: what ground truth bills with the reviewer assumed correct — {cost.false_merge:g} per \
 false merge, {cost.review:g} per queued pair, {cost.false_split:g} per true pair left apart \
-outside the queue, the terms `reports/model.md` bills its bands on.
+outside the queue, the terms `{report_dir}/model.md` bills its bands on.
 
 ## Chaining, shown
 
@@ -764,7 +770,9 @@ def main(argv: list[str] | None = None) -> int:
         include_semantic=args.semantic,
         n_restarts=args.restarts,
     )
-    markdown = render_markdown(report)
+    markdown = render_markdown(
+        report, out=DEFAULT_OUT if args.out is None else args.out.as_posix()
+    )
     print(markdown)
 
     if args.out is not None:

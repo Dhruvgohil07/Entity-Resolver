@@ -83,6 +83,22 @@ def test_entity_id_serve_time_vs_benchmark_shape():
     assert benchmark.entity_id == "entity-1"
 
 
+def test_split_group_defaults_to_none_and_round_trips():
+    # None is what every benchmark loader leaves it as, and what keeps their
+    # splits exactly entity-grouped.
+    assert _full_record().split_group is None
+    grouped = _full_record(split_group="synthetic:f001")
+    assert Record.model_validate(grouped.model_dump()) == grouped
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t"])
+def test_blank_split_group_rejected(blank):
+    # A blank group would bind every record carrying it into one unsplittable
+    # unit, which reads as a valid split and is not one.
+    with pytest.raises(ValidationError):
+        _full_record(split_group=blank)
+
+
 # ---------------------------------------------------------------------------
 # Regressions: validation gaps that only bite once a CSV loader exists
 #

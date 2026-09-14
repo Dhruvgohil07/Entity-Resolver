@@ -35,10 +35,28 @@ from dedup.blocking.union import (
     score,
     union_run,
 )
-from dedup.data import DATASETS, load_dataset
+from dedup.data import DATASETS, NO_NOTES, DatasetNotes, load_dataset
 from dedup.normalize import NormalizedRecord, normalize
 
 MISSED_EXAMPLES = 10
+DEFAULT_OUT = "reports/blocking.md"
+
+# Passages that make a dataset-specific claim; see data/notes.py. None has
+# generic text: a dataset nobody has written notes for gets no provenance or
+# tuning claim at all, which is the only claim that is true of every catalog.
+PASSAGE_SLOTS = frozenset({"blocking.intro", "blocking.provenance", "blocking.tuning"})
+
+# Past this many possible pairs the exhaustive baseline cannot hold its scored
+# pairs in 1 GiB -- it keeps two int64 indices and a float64 score per pair --
+# which is where the reduction ratio stops flattering a small catalog and
+# becomes the reason the pipeline can run at all.
+BRUTE_FORCE_PAIRS = 2**30 // 24
+
+_CEILING_BULLET = """\
+- **Which ceiling applies depends on what is being compared.** The {ceiling:.4f} above is the
+  batch-deduplication number over the whole catalog. When `features/` and `model/` report
+  test-split recall against the baseline's test-split F1, the ceiling that binds them is
+  the test-split one, not this."""
 
 
 @dataclass(frozen=True)
@@ -52,6 +70,7 @@ class BlockingReport:
     missed_examples: list[tuple[str, str]]
     n_missed: int
     warnings: list[str]
+    omitted: tuple[str, ...] = ()  # default blockers left out of this run, by name
 
 
 def evaluate(
@@ -59,6 +78,7 @@ def evaluate(
     blockers: Sequence[Blocker],
     *,
     dataset: str,
+    omitted: Sequence[str] = (),
 ) -> BlockingReport:
     n = len(records)
     truth, n_true = ground_truth(records)
@@ -86,6 +106,7 @@ def evaluate(
         missed_examples=examples,
         n_missed=int(missed.size),
         warnings=[f"{run.name}: {w}" for run in runs for w in run.warnings],
+        omitted=tuple(omitted),
     )
 
 
@@ -98,18 +119,65 @@ def _row(s: BlockerScore) -> str:
     )
 
 
-def render_markdown(report: BlockingReport) -> str:
+def _omitted_bullet(omitted: Sequence[str]) -> str:
+    """A union of fewer blockers is a lower ceiling, and must not pass for the default one."""
+    if not omitted:
+        return ""
+    names = ", ".join(f"`{name}`" for name in omitted)
+    return f"""- **Not every default blocker ran: {names} did not.** The union row is the ceiling of the
+  blockers in the table, not of the default set every later stage inherits, so it is not
+  comparable with a union that includes them. Run without the omission to measure that one."""
+
+
+def _reduction_ratio_bullet(n_all_pairs: int) -> str:
+    """Whether RR flatters a catalog is a property of its size, so it is measured."""
+    if n_all_pairs <= BRUTE_FORCE_PAIRS:
+        return f"""- **RR is flattered by a small N.** {n_all_pairs:,} possible pairs is a number a
+  laptop can brute-force; the baseline does exactly that. The reduction ratio only
+  becomes load-bearing when N² stops being computable."""
+    return f"""- **At this N the reduction ratio is load-bearing.** {n_all_pairs:,} possible pairs is
+  past the {BRUTE_FORCE_PAIRS:,} an exhaustive baseline can score in 1 GiB, so the candidate
+  count above is the difference between a catalog `features/` can vectorize and one it
+  cannot. Read RR beside that count, never instead of it."""
+
+
+def render_markdown(
+    report: BlockingReport,
+    *,
+    notes: DatasetNotes = NO_NOTES,
+    out: str = DEFAULT_OUT,
+    flags: str = "",
+) -> str:
+    """The reports/ artifact, with the dataset's own caveats where `notes` supply them.
+
+    `out` and `flags` complete the regenerate command, so a report run with
+    `--ann-components` or written outside `reports/` still reproduces itself.
+    """
     body = "\n".join(_row(r) for r in report.rows)
     union_line = _row(report.union_row)
     ceiling = report.union_row.pair_completeness
 
     examples = "\n".join(
-        f"{i}. `{abt}`\n   `{buy}`" for i, (abt, buy) in enumerate(report.missed_examples, start=1)
+        f"{i}. `{first}`\n   `{second}`"
+        for i, (first, second) in enumerate(report.missed_examples, start=1)
     )
     warnings = (
         "\n".join(f"- ⚠ {w}" for w in report.warnings)
         if report.warnings
         else "- No blocker dropped a block or otherwise lowered its own ceiling on this run."
+    )
+    intro = notes.passage("blocking.intro", "")
+    intro_block = f"\n{intro}\n" if intro else ""
+    honest = "\n".join(
+        bullet
+        for bullet in (
+            notes.passage("blocking.provenance", ""),
+            _omitted_bullet(report.omitted),
+            _reduction_ratio_bullet(report.n_all_pairs),
+            notes.passage("blocking.tuning", ""),
+            _CEILING_BULLET.format(ceiling=ceiling),
+        )
+        if bullet
     )
 
     return f"""# Blocking: candidate generation and the recall ceiling
@@ -119,17 +187,11 @@ def render_markdown(report: BlockingReport) -> str:
 Blockers are deterministic given the records, so no seed applies. Candidate counts and
 completeness figures reproduce exactly between runs — the ANN index is built
 single-threaded for that reason. Only the wall-clock columns vary.
-
-**These parameters were chosen against these same numbers.** The window, neighbour
-count and document-frequency cutoff were selected by sweeping them over this full
-catalog, not over a held-out split, so the figures below are fit to this dataset and
-are optimistic as an estimate of what these settings would do on an unseen one. See
-*Reading this honestly* for the held-out ceilings.
-
+{intro_block}
 Regenerate with:
 
 ```bash
-python -m dedup.blocking.evaluate --dataset {report.dataset} --out reports/blocking.md
+python -m dedup.blocking.evaluate --dataset {report.dataset}{flags} --out {out}
 ```
 
 ## The table
@@ -172,24 +234,7 @@ set, not the count, is where the next blocker's design comes from:
 
 ## Reading this honestly
 
-- **Abt-Buy is pre-blocked.** It ships as two curated catalogs of ~1,000 records each,
-  already scoped to overlapping product ranges. A high union PC here says the benchmark
-  is small and clean, not that blocking is solved. `synth/` — 200k to 1M records with
-  known ground truth — is where this stage earns its keep, and where a dense ANN index
-  stops fitting in memory.
-- **RR is flattered by a small N.** {report.n_all_pairs:,} possible pairs is a number a
-  laptop can brute-force; the baseline does exactly that. The reduction ratio only
-  becomes load-bearing when N² stops being computable.
-- **The parameters were tuned on the catalog they are scored on.** No held-out split was
-  used to pick the window, neighbour count or df cutoff, so treat the union figure as a
-  best-of-sweep number rather than a clean estimate. Measured for comparison on the
-  entity-grouped split (`seed=0`), where the same settings give union pair completeness
-  **0.9949 on train and 1.0000 on test** — so the selection bias here is small, but it is
-  present and unmeasured until parameters are chosen on train alone.
-- **Which ceiling applies depends on what is being compared.** The {ceiling:.4f} above is the
-  batch-deduplication number over the whole catalog. When `features/` and `model/` report
-  test-split recall against the baseline's test-split F1, the ceiling that binds them is
-  the test-split one, not this.
+{honest}
 """
 
 
@@ -197,12 +242,44 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dataset", default="abt-buy", choices=sorted(DATASETS))
     parser.add_argument("--root", type=Path, default=None, help="override the dataset directory")
+    parser.add_argument(
+        "--ann-components",
+        type=int,
+        default=None,
+        help="project ann's vectors with SVD before indexing -- needed once the dense index "
+        "outgrows its memory budget, and it changes ann's candidates",
+    )
+    parser.add_argument(
+        "--without",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="leave out every default blocker whose name starts with NAME (repeatable); the "
+        "report names what was left out, since its union is then not the default ceiling",
+    )
     parser.add_argument("--out", type=Path, default=None, help="write the markdown report here")
     args = parser.parse_args(argv)
 
     records = [normalize(record) for record in load_dataset(args.dataset, args.root)]
-    report = evaluate(records, default_blocker_set(), dataset=args.dataset)
-    markdown = render_markdown(report)
+    blockers = default_blocker_set(ann_components=args.ann_components)
+    for prefix in args.without:
+        if not any(blocker.name.startswith(prefix) for blocker in blockers):
+            parser.error(f"--without {prefix!r} matches no default blocker")
+    omitted = [b.name for b in blockers if any(b.name.startswith(p) for p in args.without)]
+    report = evaluate(
+        records,
+        [blocker for blocker in blockers if blocker.name not in omitted],
+        dataset=args.dataset,
+        omitted=omitted,
+    )
+    flags = "" if args.ann_components is None else f" --ann-components {args.ann_components}"
+    flags += "".join(f" --without {prefix}" for prefix in args.without)
+    markdown = render_markdown(
+        report,
+        notes=DATASETS[args.dataset].notes,
+        out=DEFAULT_OUT if args.out is None else args.out.as_posix(),
+        flags=flags,
+    )
     print(markdown)
 
     if args.out is not None:

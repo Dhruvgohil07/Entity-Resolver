@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,7 +44,8 @@ import numpy as np
 
 from dedup.blocking.defaults import block_split
 from dedup.blocking.union import BlockerScore
-from dedup.data import DATASETS, load_dataset
+from dedup.data import DATASETS, NO_NOTES, DatasetNotes, load_dataset
+from dedup.eval.baseline import BaselineRow, floor_caveat, registered_baseline
 from dedup.eval.metrics import average_precision, precision_recall_curve
 from dedup.eval.splits import count_true_pairs, group_by_entity, split_by_entity
 from dedup.features.base import FeatureSpec
@@ -55,6 +57,48 @@ from dedup.schema import Record
 # untroubled by collinearity -- but two columns costing two computations to
 # say one thing is worth seeing in the report.
 CORRELATION_ALERT = 0.95
+DEFAULT_OUT = "reports/features.md"
+
+# Passages that make a dataset-specific claim; see data/notes.py. Each constant
+# below is the generic text its slot prints when a dataset's notes leave it alone.
+PASSAGE_SLOTS = frozenset(
+    {
+        "features.computation",
+        "features.narrow_column",
+        "features.wrong_way",
+        "features.wrong_way_caution",
+        "features.tuning",
+    }
+)
+
+_COMPUTATION = """\
+Two things about how these are computed:
+
+- **Every figure is over the covered pairs only.** Averaging the fill into a class mean
+  reads a null as a mismatch — the error CLAUDE.md's missingness invariant exists to
+  prevent, and it is just as wrong in a report as in a vector. The same restriction applies
+  to the ranking, where a fill of 0.0 ranks last for a similarity column but — once negated
+  — ranks *first* for a distance column, sorting an absent price as a perfect price match.
+- **`distance` columns are negated before ranking**, so their PR-AUC is comparable with the
+  rest. Without it `price_abs_log_ratio` would report as useless for being strong."""
+
+_NARROW_COLUMN = """\
+The recall denominator stays every true pair in the split, so a narrow column cannot look
+strong by being asked less: its PR-AUC is bounded by the share of the split's true pairs it
+covers, its `n+`. Read PR-AUC as *how much of the problem this column can reach*, and the
+means as *whether it points the right way where it applies*. They answer different
+questions and a column can score well on one and badly on the other."""
+
+_WRONG_WAY = """\
+A column listed here separates the classes against the direction it was declared in, on
+this catalog. That can be a real property of how the catalog was assembled rather than a
+bug, so find the cause before flipping a sign: a tree model uses a backwards column
+correctly, and a human reading the column name does not."""
+
+_WRONG_WAY_CAUTION = """\
+Check `n+` before drawing a conclusion from any row in this section. A column covered on a
+handful of true pairs can land here on noise, and the fix for that is more data, not a sign
+flip."""
 
 
 @dataclass(frozen=True)
@@ -293,8 +337,81 @@ def _row(diagnostic: FeatureDiagnostic) -> str:
     )
 
 
-def render_markdown(report: FeatureReport) -> str:
-    """The reports/ artifact: numbers plus the caveats that make them readable."""
+def _baseline_passages(report: FeatureReport, baseline: BaselineRow | None) -> tuple[str, str]:
+    """The intro's clause about the baseline, and the bullet on comparing against it.
+
+    Whether `title_tfidf_cosine` outranks the baseline here is measured, not
+    asserted: it is a property of the candidate set on this split, and on
+    another catalog it can go the other way.
+    """
+    test = report.test
+    if baseline is None:
+        answers = (
+            "and no baseline\nreport is registered for this dataset, so nothing here is "
+            "compared against one."
+        )
+        comparable = (
+            "- **No PR-AUC here is comparable to a baseline's.** A baseline that scores the full\n"
+            f"  N² upper triangle is not ranking these {test.n_candidates:,} pairs, which blocking\n"
+            f"  left after discarding {test.blocking.reduction_ratio:.2%} of the triangle, almost all\n"
+            "  negatives. Precision here rises because the negatives are gone, not because a\n"
+            "  column got better. No baseline report is registered for this dataset, so none is\n"
+            "  quoted."
+        )
+        return answers, comparable
+
+    answers = (
+        f"the number\nthat answers `{baseline.path}`'s **test F1 {baseline.f1:.4f}** arrives "
+        "with\n`model/`."
+    )
+    tfidf = next((d for d in report.diagnostics if d.spec.name == "title_tfidf_cosine"), None)
+    higher = tfidf is not None and tfidf.pr_auc is not None and tfidf.pr_auc > baseline.pr_auc
+    direction = (
+        "and it scores *higher* in this\n  table — which measures the candidate set, not the column."
+        if higher
+        else "but it does not score\n  higher in this table, so the candidate set did not flatter "
+        "it here."
+    )
+    comparable = (
+        f"- **No PR-AUC here is comparable to the baseline's {baseline.pr_auc:.4f}.** "
+        "`title_tfidf_cosine` is\n"
+        f"  very nearly the baseline's own similarity function, {direction} The baseline ranks "
+        "the full\n"
+        f"  N² upper triangle; this ranks the {test.n_candidates:,} pairs blocking left,\n"
+        f"  having already discarded {test.blocking.reduction_ratio:.2%} of them, almost all\n"
+        "  negatives. Precision rises because the negatives are gone, not because the column "
+        "got\n"
+        f"  better. The like-for-like comparison against {baseline.f1:.4f} is a trained, "
+        "calibrated model\n"
+        "  scored end to end, and it does not exist until `model/`."
+    )
+    caveat = floor_caveat(baseline)
+    if caveat is not None:
+        wrapped = textwrap.fill(
+            caveat,
+            width=90,
+            initial_indent="- ",
+            subsequent_indent="  ",
+            break_on_hyphens=False,
+            break_long_words=False,
+        )
+        comparable = f"{comparable}\n{wrapped}"
+    return answers, comparable
+
+
+def render_markdown(
+    report: FeatureReport,
+    *,
+    notes: DatasetNotes = NO_NOTES,
+    baseline: BaselineRow | None = None,
+    out: str = DEFAULT_OUT,
+) -> str:
+    """The reports/ artifact: numbers plus the caveats that make them readable.
+
+    `notes` supplies the dataset's own passages and `baseline` its committed
+    baseline row. Without them the report states only what holds for any
+    catalog, and compares against nothing.
+    """
     ranked = sorted(
         report.diagnostics, key=lambda d: (d.pr_auc if d.pr_auc is not None else -1.0), reverse=True
     )
@@ -318,20 +435,33 @@ def render_markdown(report: FeatureReport) -> str:
 
     imbalance = report.test.n_candidates / max(report.test.n_true_pairs, 1)
     semantic = "on" if report.include_semantic else "off (`--semantic` enables it)"
+    answers, comparable = _baseline_passages(report, baseline)
+    computation = notes.passage("features.computation", _COMPUTATION)
+    narrow_column = notes.passage("features.narrow_column", _NARROW_COLUMN)
+    wrong_way = "\n\n".join(
+        part
+        for part in (
+            anti_lines,
+            notes.passage("features.wrong_way", _WRONG_WAY if anti else ""),
+            notes.passage("features.wrong_way_caution", _WRONG_WAY_CAUTION if anti else ""),
+        )
+        if part
+    )
+    tuning = notes.passage("features.tuning", "")
+    tuning_block = f"\n{tuning}" if tuning else ""
 
     return f"""# Feature diagnostics
 
 What each column of the pair vector is worth on its own, before any model sees
-it. `features/` has no classifier in it, so there is no F1 here — the number
-that answers `reports/baseline_tfidf.md`'s **test F1 0.5204** arrives with
-`model/`. This table exists to catch the failures that are invisible from
+it. `features/` has no classifier in it, so there is no F1 here — {answers} \
+This table exists to catch the failures that are invisible from
 inside a model: a constant column, a column whose sign is backwards, and a
 column imputed on almost every pair all read as "the model did not improve".
 
 Regenerate with:
 
 ```bash
-python -m dedup.features.evaluate --dataset {report.dataset} --out reports/features.md
+python -m dedup.features.evaluate --dataset {report.dataset} --out {out}
 ```
 
 ## Setup
@@ -370,42 +500,13 @@ classes in the opposite direction to how it was declared.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 {rows}
 
-Two things about how these are computed, both of which changed a published number here:
+{computation}
 
-- **Every figure is over the covered pairs only.** Averaging the fill into a class mean
-  reads a null as a mismatch — the error CLAUDE.md's missingness invariant exists to
-  prevent, and it is just as wrong in a report as in a vector. `brand_equal` is covered on
-  2.3% of positives against 24.3% of negatives, so averaging 0.0 in at those rates reported
-  it as pointing *backwards*, when on pairs that actually have a brand it points forwards
-  and strongly. The same restriction applies to the ranking, where a fill of 0.0 ranks last
-  for a similarity column but — once negated — ranks *first* for a distance column, sorting
-  an absent price as a perfect price match.
-- **`distance` columns are negated before ranking**, so their PR-AUC is comparable with the
-  rest. Without it `price_abs_log_ratio` would report as useless for being strong.
-
-The recall denominator stays every true pair in the split, so a narrow column cannot look
-strong by being asked less: `brand_equal` can address 8 of 341 true pairs, and its PR-AUC
-is bounded near 0.02 accordingly. Read PR-AUC as *how much of the problem this column can
-reach*, and the means as *whether it points the right way where it applies*. They answer
-different questions and a column can score well on one and badly on the other.
+{narrow_column}
 
 ## Columns pointing the wrong way
 
-{anti_lines}
-
-This is **not** a bug, and flipping the sign would be the wrong fix. It is the
-deduplication framing showing through: every pair of the combined catalog is a candidate,
-so same-side pairs (Buy against Buy) sit in the table alongside the cross-source pairs that
-carry almost all the true matches. Abt descriptions average 249 characters against Buy's
-34, so two descriptions of *similar* length are evidence of being same-side — which on this
-dataset means evidence of being a non-match. A tree model uses that correctly. A human
-reading the column name does not, which is why it is called out here.
-
-Check `n+` before drawing a conclusion from any row in this section. A column covered on a
-handful of true pairs can land here on noise, and the fix for that is more data, not a sign
-flip. `brand_equal` was listed here in an earlier version of this report for a worse reason
-than noise: the class means included the fill, so a missing brand was being counted as a
-brand mismatch.
+{wrong_way}
 
 ## Near-duplicate columns
 
@@ -417,14 +518,7 @@ brand mismatch.
   column cannot separate the classes *alone*. `code_best_ratio` near 1.0 means one
   thing when `model_number_exact` is 1 and the opposite when it is 0, and no single-column
   metric can show that. Use this table to find broken columns, not to prune the vector.
-- **No PR-AUC here is comparable to the baseline's 0.4720.** `title_tfidf_cosine` is
-  very nearly the baseline's own similarity function, and it scores *higher* in this
-  table — which measures the candidate set, not the column. The baseline ranks the full
-  N² upper triangle; this ranks the {report.test.n_candidates:,} pairs blocking left,
-  having already discarded {report.test.blocking.reduction_ratio:.2%} of them, almost all
-  negatives. Precision rises because the negatives are gone, not because the column got
-  better. The like-for-like comparison against 0.5204 is a trained, calibrated model
-  scored end to end, and it does not exist until `model/`.
+{comparable}
 - **PR-AUC, not ROC-AUC.** At 1 positive per {imbalance:,.0f} pairs, ROC-AUC reads ~0.99
   for a column with no practical value (CLAUDE.md, Invariants).
 - **Recall divides by every true pair in the split**, including the ones blocking never
@@ -434,10 +528,7 @@ brand mismatch.
   so the model can tell a computed 0.0 from a filled one, and that pairing is enforced when
   the featurizer is constructed rather than by review. A low-coverage column still
   contributes more inside the vector than its row here suggests, because the model gets the
-  indicator alongside it and this table scores the column alone.
-- **The blocker parameters were swept on the full catalog**, so the PC figures inherited
-  here are best-of-sweep rather than a clean estimate. Small bias, still unquantified —
-  it is recorded as an open question in CLAUDE.md and not resolved by this report.
+  indicator alongside it and this table scores the column alone.{tuning_block}
 """
 
 
@@ -463,7 +554,13 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         include_semantic=args.semantic,
     )
-    markdown = render_markdown(report)
+    notes = DATASETS[args.dataset].notes
+    markdown = render_markdown(
+        report,
+        notes=notes,
+        baseline=registered_baseline(notes, args.dataset),
+        out=DEFAULT_OUT if args.out is None else args.out.as_posix(),
+    )
     print(markdown)
 
     if args.out is not None:

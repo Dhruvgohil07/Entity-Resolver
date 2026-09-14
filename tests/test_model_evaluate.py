@@ -14,18 +14,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from dedup.data import DATASETS
 from dedup.data.abt_buy import load_abt_buy
+from dedup.eval.baseline import read_baseline_row
 from dedup.eval.metrics import ThresholdPoint
 from dedup.model.calibrate import OutOfFoldScores
 from dedup.model.evaluate import (
-    BASELINE_ORACLE_F1,
-    BASELINE_TEST_F1,
-    BASELINE_TEST_P_AT_K,
-    BASELINE_TEST_PR_AUC,
-    BASELINE_TEST_PRECISION,
-    BASELINE_TEST_R_PRECISION,
-    BASELINE_TEST_RECALL,
-    BASELINE_THRESHOLD,
     SENSITIVITY_RATIOS,
     CalibrationStats,
     ModelReport,
@@ -37,6 +31,10 @@ from dedup.model.threshold import BandSummary, CostModel
 
 REAL_DATA = Path(__file__).parent.parent / "data" / "raw" / "abt-buy"
 BASELINE_REPORT = Path(__file__).parent.parent / "reports" / "baseline_tfidf.md"
+# Abt-Buy's committed baseline row and report passages, exactly as the CLI hands
+# them to the renderer. Needs no dataset: reports/ and the registry are committed.
+BASELINE = read_baseline_row(BASELINE_REPORT, dataset="abt-buy")
+ABT_BUY_NOTES = DATASETS["abt-buy"].notes
 
 
 def flat(markdown):
@@ -155,7 +153,7 @@ def report():
 @pytest.mark.skipif(not REAL_DATA.is_dir(), reason="Abt-Buy not downloaded; see CLAUDE.md > Data")
 def test_the_model_beats_the_published_baseline(report):
     """The claim the whole stage exists to make, on the baseline's own protocol."""
-    assert report.test_point.f1 > BASELINE_TEST_F1
+    assert report.test_point.f1 > BASELINE.f1
     # Guards against a leak as much as a regression: the probe that motivated
     # this stage landed near 0.89, and a number far above it would mean test
     # data reached the model rather than that the model improved.
@@ -243,10 +241,10 @@ def test_vendor_code_columns_lead_the_gain_ranking(report):
 
 @pytest.mark.skipif(not REAL_DATA.is_dir(), reason="Abt-Buy not downloaded; see CLAUDE.md > Data")
 def test_the_markdown_states_both_operating_points_and_the_caveats(report):
-    markdown = flat(render_markdown(report))
+    markdown = flat(render_markdown(report, notes=ABT_BUY_NOTES, baseline=BASELINE))
 
     assert "auto-merge" in markdown and "auto-reject" in markdown and "review" in markdown
-    assert str(BASELINE_TEST_F1) in markdown
+    assert f"{BASELINE.f1:.4f}" in markdown
     assert f"{report.test_point.f1:.4f}" in markdown
     # The honesty section must survive edits to the report.
     assert "not comparable to the baseline's; recall is" in markdown
@@ -302,7 +300,7 @@ def test_blocking_loss_is_measured_not_assumed(report):
 
 
 def test_the_synthetic_report_takes_the_quiet_branches_by_default():
-    text = flat(render_markdown(synthetic_report()))
+    text = flat(render_markdown(synthetic_report(), notes=ABT_BUY_NOTES, baseline=BASELINE))
     assert "on the test split it does not bind" in text
     assert "Blocking emitted every one of them" in text
     assert "not validated by this dataset" in text
@@ -362,38 +360,58 @@ def test_no_auto_rejected_pair_is_stated_rather_than_explained():
 
 
 def test_the_desc_len_ratio_note_appears_only_when_the_column_ranks():
-    text = flat(render_markdown(synthetic_report(importance=[("code_token_jaccard", 100.0)])))
+    report = synthetic_report(importance=[("code_token_jaccard", 100.0)])
+    text = flat(render_markdown(report, notes=ABT_BUY_NOTES))
     assert "desc_len_ratio" not in text
 
 
 # ---------------------------------------------------------------------------
-# The baseline row is restated, not recomputed -- so it is checked against the
-# committed report instead. Needs no dataset: reports/ is committed.
+# The baseline row comes from the dataset's committed baseline report, never
+# from constants here -- and a dataset with no baseline is compared against
+# nothing. Parsing that report is tested in tests/test_eval_baseline.py.
 # ---------------------------------------------------------------------------
-
-
-def test_the_restated_baseline_row_matches_the_committed_report():
-    row = next(
-        line
-        for line in BASELINE_REPORT.read_text(encoding="utf-8").splitlines()
-        if line.startswith("| title |")
-    )
-    cells = [cell.strip().strip("*") for cell in row.strip().strip("|").split("|")]
-    _, f1, precision, recall, pr_auc, p10, p100, r_prec, threshold, oracle = cells
-
-    assert float(f1) == BASELINE_TEST_F1
-    assert float(precision) == BASELINE_TEST_PRECISION
-    assert float(recall) == BASELINE_TEST_RECALL
-    assert float(pr_auc) == BASELINE_TEST_PR_AUC
-    assert float(p10) == BASELINE_TEST_P_AT_K[10]
-    assert float(p100) == BASELINE_TEST_P_AT_K[100]
-    assert float(r_prec) == BASELINE_TEST_R_PRECISION
-    assert float(threshold) == BASELINE_THRESHOLD
-    assert float(oracle) == BASELINE_ORACLE_F1
 
 
 def test_the_baseline_row_has_no_blank_cells():
     """A dash in a comparison row reads as "not measured" when it was measured."""
-    text = render_markdown(synthetic_report())
+    text = render_markdown(synthetic_report(), baseline=BASELINE)
     row = next(line for line in text.splitlines() if line.startswith("| baseline (TF-IDF) |"))
     assert "—" not in row
+    assert f"| {BASELINE.oracle_f1:.4f} |" in row
+
+
+def test_without_a_baseline_nothing_is_compared_against_one():
+    """A synthetic catalog must not inherit Abt-Buy's 0.5204 as its own baseline."""
+    text = flat(render_markdown(synthetic_report()))
+    assert "| baseline (TF-IDF) |" not in text
+    assert "0.5204" not in text
+    assert "against the baseline" not in text
+    assert "not comparable to the baseline's; recall is" not in text
+    assert "No baseline report is registered for this dataset" in text
+
+
+def test_a_pipeline_that_loses_to_its_baseline_is_not_said_to_beat_it():
+    losing = replace(BASELINE, f1=0.99)
+    text = flat(render_markdown(synthetic_report(), baseline=losing))
+    assert "beats the baseline as a **pipeline**" not in text
+    assert "does not beat the baseline here" in text
+
+
+def test_a_floored_baseline_is_quoted_with_what_the_floor_cost():
+    floored = replace(BASELINE, min_similarity=0.2, recall_ceiling=0.98)
+    text = flat(render_markdown(synthetic_report(), baseline=floored))
+    assert "scored above a similarity floor of 0.2" in text
+    assert "reaches recall 0.9800 at most" in text
+    assert "similarity floor" not in flat(render_markdown(synthetic_report(), baseline=BASELINE))
+
+
+def test_a_gain_column_is_explained_only_by_its_datasets_notes():
+    """desc_len_ratio pointing backwards is an Abt-Buy measurement, not a property of the column."""
+    assert "ranks #2 on gain" not in flat(render_markdown(synthetic_report()))
+    assert "ranks #2 on gain" in flat(render_markdown(synthetic_report(), notes=ABT_BUY_NOTES))
+
+
+def test_cross_references_follow_the_report_directory():
+    text = render_markdown(synthetic_report(), baseline=BASELINE, out="reports/synth/model.md")
+    assert "`reports/synth/features.md`" in text
+    assert "--out reports/synth/model.md" in text
