@@ -168,6 +168,22 @@ def render_markdown(
     )
     intro = notes.passage("blocking.intro", "")
     intro_block = f"\n{intro}\n" if intro else ""
+    if report.omitted:
+        omitted_names = ", ".join(f"`{name}`" for name in report.omitted)
+        ceiling_claim = f"""**The union row is the only one the rest of the pipeline inherits \
+on this run** — but this run left {omitted_names} out. Its pair completeness of \
+**{ceiling:.4f}** is therefore a **lower bound** on the default blocker set's ceiling, not the
+ceiling itself: the omitted blocker could only add candidates, never remove them, so the
+default set's true completeness is at least this high. The
+{report.n_missed} true pairs no blocker *here* emitted are never scored by `features/`,
+never seen by `model/`, and never reach `cluster/` — on this run. Whether the omitted
+blocker recovers any of them is not measured until it runs."""
+    else:
+        ceiling_claim = f"""**The union row is the only one the rest of the pipeline inherits.** Its pair
+completeness of **{ceiling:.4f}** is a hard ceiling on system recall: the
+{report.n_missed} true pairs no blocker emitted are never scored by `features/`,
+never seen by `model/`, and never reach `cluster/`. No amount of model work
+recovers them."""
     honest = "\n".join(
         bullet
         for bullet in (
@@ -215,11 +231,7 @@ not an error.
 
 ## What this means
 
-**The union row is the only one the rest of the pipeline inherits.** Its pair
-completeness of **{ceiling:.4f}** is a hard ceiling on system recall: the
-{report.n_missed} true pairs no blocker emitted are never scored by `features/`,
-never seen by `model/`, and never reach `cluster/`. No amount of model work
-recovers them.
+{ceiling_claim}
 
 Individual blockers are *expected* to be mediocre. They earn their place by failing
 differently — a blocker with low standalone PC is worth keeping if it lifts the union,

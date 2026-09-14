@@ -245,6 +245,22 @@ def test_a_run_that_left_a_blocker_out_says_its_union_is_not_the_default_ceiling
     assert "Not every default blocker ran: `lsh (minhash)` did not." in text
 
 
+def test_a_run_with_an_omission_calls_its_union_a_lower_bound_not_a_ceiling(catalog):
+    """reports/synth/blocking-200k.md called its --without lsh union "the ceiling" the rest
+    of the pipeline inherits -- wrong, since the omitted blocker could only add candidates.
+    "What this means" must hedge exactly where "Reading this honestly" already does."""
+    full = render_markdown(evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic"))
+    assert "hard ceiling on system recall" in full
+    assert "lower bound" not in full
+
+    report = evaluate(
+        catalog, [AnnBlocker(neighbours=2)], dataset="synthetic", omitted=["lsh (minhash)"]
+    )
+    text = " ".join(render_markdown(report).split())
+    assert "hard ceiling on system recall" not in text
+    assert "a **lower bound** on the default blocker set's ceiling, not the" in text
+
+
 def test_the_regenerate_command_reproduces_the_run(catalog):
     report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
     markdown = render_markdown(report, out="reports/synth/blocking.md", flags=" --ann-components 8")

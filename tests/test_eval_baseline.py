@@ -21,6 +21,7 @@ import pytest
 from dedup.data import DATASETS
 from dedup.data.abt_buy import load_abt_buy
 from dedup.eval.baseline import (
+    GAP_TRANSFERS_WELL,
     comparison_text,
     fit_vectorizer,
     floor_caveat,
@@ -371,6 +372,26 @@ def test_a_train_f1_above_test_is_not_explained_away():
     assert "comes out *below* test F1, and that is not a bug" in below
     assert "comes out *above* test F1 on this catalog" in above
     assert "that is not a bug" not in above
+
+
+def test_a_small_oracle_gap_is_not_called_a_transfer_failure():
+    """synth-20k's oracle gap is 0.0030 -- far under a rounding-sized 0.01 -- yet the
+    report used to print "a single global threshold still does not transfer" there
+    unconditionally. The claim must follow the gap, in both directions."""
+    report = run_baseline(make_pairs(60), dataset="synthetic", seed=0)
+    variant = report.variants[0]
+
+    def rendered_with_oracle_gap(gap):
+        oracle = replace(variant.test_oracle, f1=variant.test_point.f1 + gap)
+        moved = replace(variant, test_oracle=oracle)
+        return " ".join(render_markdown(replace(report, variants=[moved, *report.variants[1:]])).split())
+
+    small = rendered_with_oracle_gap(GAP_TRANSFERS_WELL / 2)
+    large = rendered_with_oracle_gap(GAP_TRANSFERS_WELL * 5)
+    assert "it transfers well" in small
+    assert "it does not transfer well" not in small
+    assert "it does not transfer well" in large
+    assert "it transfers well" not in large
 
 
 def test_a_raised_floor_is_not_described_as_scoring_with_no_ceiling():

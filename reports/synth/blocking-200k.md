@@ -15,11 +15,11 @@ python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --wi
 
 | blocker | params | candidates | PC | RR | build s | query s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| standard (model number) | key=model_number_key, max_block=100 | 204,420 | 0.5355 | 1.0000 | 0.1 | 2.1 |
-| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 193,611 | 0.6076 | 1.0000 | 3.3 | 2.3 |
-| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 309,409 | 0.4147 | 1.0000 | 1.9 | 2.6 |
-| sorted_neighborhood | w=20 | 3,148,376 | 0.1247 | 0.9998 | 0.3 | 3.4 |
-| ann (faiss HNSW) | M=32, ef=100, k=10, svd=128 | 1,254,024 | 0.0597 | 0.9999 | 94.6 | 14.2 |
+| standard (model number) | key=model_number_key, max_block=100 | 204,420 | 0.5355 | 1.0000 | 0.1 | 2.0 |
+| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 193,611 | 0.6076 | 1.0000 | 3.3 | 2.2 |
+| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 309,409 | 0.4147 | 1.0000 | 2.2 | 2.0 |
+| sorted_neighborhood | w=20 | 3,148,376 | 0.1247 | 0.9998 | 0.2 | 2.3 |
+| ann (faiss HNSW) | M=32, ef=100, k=10, svd=128 | 1,254,024 | 0.0597 | 0.9999 | 73.0 | 10.7 |
 | union (all) | — | 4,504,713 | 0.6712 | 0.9997 | — | — |
 
 **PC** is pair completeness — true pairs surviving, divided by all 181,045 ground-truth pairs (never by the survivors).
@@ -36,11 +36,12 @@ not an error.
 
 ## What this means
 
-**The union row is the only one the rest of the pipeline inherits.** Its pair
-completeness of **0.6712** is a hard ceiling on system recall: the
-59535 true pairs no blocker emitted are never scored by `features/`,
-never seen by `model/`, and never reach `cluster/`. No amount of model work
-recovers them.
+**The union row is the only one the rest of the pipeline inherits on this run** — but this run left `lsh (minhash)` out. Its pair completeness of **0.6712** is therefore a **lower bound** on the default blocker set's ceiling, not the
+ceiling itself: the omitted blocker could only add candidates, never remove them, so the
+default set's true completeness is at least this high. The
+59535 true pairs no blocker *here* emitted are never scored by `features/`,
+never seen by `model/`, and never reach `cluster/` — on this run. Whether the omitted
+blocker recovers any of them is not measured until it runs.
 
 Individual blockers are *expected* to be mediocre. They earn their place by failing
 differently — a blocker with low standalone PC is worth keeping if it lifts the union,

@@ -58,10 +58,8 @@ Per-variant detail:
   1,155,960 pairs against test's 212,226 — 5.4x as many —
   while true pairs grow only linearly with records. At a fixed cosine threshold the false
   positives scale with the pair count and the true positives do not, so precision, and
-  with it F1, falls as the catalog grows. A single global threshold therefore does not
-  transfer across catalog sizes; the gap between the train-chosen threshold and the test
-  oracle above shows how little that cost here, but on a 200k-record `synth/` catalog it
-  is the whole problem.
+  with it F1, falls as the catalog grows — a size effect, separate from whether the
+  train-chosen threshold carries over to test: it transfers well: the test oracle reaches only 0.0045 F1 higher, so re-tuning the cut with test labels in hand would have bought almost nothing on this split.
 - **Best-F1 thresholds are a baseline convention, not the plan.** The real thresholds come
   from expected cost, because a false merge corrupts the catalog and a false split merely
   leaves a duplicate (CLAUDE.md, Invariants).
