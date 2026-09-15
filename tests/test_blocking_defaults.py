@@ -11,7 +11,7 @@ import numpy as np
 
 from dedup.blocking.ann import DEFAULT_NEIGHBOURS as ANN_DEFAULT_NEIGHBOURS
 from dedup.blocking.ann import AnnBlocker
-from dedup.blocking.defaults import block_split, default_blocker_set
+from dedup.blocking.defaults import block_split, block_unlabeled, default_blocker_set
 from dedup.blocking.lsh import MinHashLSHBlocker
 from dedup.blocking.union import union_run
 from dedup.normalize import normalize
@@ -66,3 +66,33 @@ def test_block_split_runs_the_same_set_default_blocker_set_returns():
     manual = union_run([blocker.run(records) for blocker in default_blocker_set()])
     assert np.array_equal(run.keys, manual.keys)
     assert score.n_candidates == run.n_candidates
+
+
+def test_block_unlabeled_runs_on_records_with_no_entity_id():
+    # A genuine batch catalog -- entity_id=None on every record, per schema.py's
+    # own docstring, because nobody knows the answer yet. block_split cannot
+    # score this: ground_truth raises on an unlabeled record. This is the
+    # entry point that actually can.
+    records = [
+        rec("s:1", "widget deluxe model xy123z stainless", entity_id=None),
+        rec("s:2", "widget deluxe xy123z model stainless v2", entity_id=None),
+        rec("s:3", "unrelated gadget item", entity_id=None),
+    ]
+    run = block_unlabeled(records)
+    assert run.n_candidates > 0
+
+
+def test_block_unlabeled_is_block_splits_labels_free_twin():
+    # Same records, once with entity_id set (so block_split can run) and once
+    # without (the shape block_unlabeled actually sees) -- the candidate set
+    # must be identical, or the two blocker lists have silently diverged.
+    labelled = [
+        rec("s:1", "widget deluxe model xy123z stainless", "e1"),
+        rec("s:2", "widget deluxe xy123z model stainless v2", "e1"),
+        rec("s:3", "unrelated gadget item", "e2"),
+    ]
+    unlabelled = [normalize(r.raw.model_copy(update={"entity_id": None})) for r in labelled]
+
+    split_run, _ = block_split(labelled)
+    unlabeled_run = block_unlabeled(unlabelled)
+    assert np.array_equal(split_run.keys, unlabeled_run.keys)

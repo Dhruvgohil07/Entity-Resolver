@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Nine stages implemented (`pytest` → 593 passing, 1 skipped; 94% line coverage). Two things
-are **not** covered by that run, and both are called out where they belong rather than folded into
-the count: the `semantic.py` carve-out inside the `features/` bullet, and the five report CLI
-entry points under the list.
+Ten stages implemented (`pytest` → 623 passing, 1 skipped; coverage not re-measured this sync).
+Two things are **not** covered by that run, and both are called out where they belong rather than
+folded into the count: the `semantic.py` carve-out inside the `features/` bullet, and the five
+report CLI entry points under the list.
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -45,10 +45,13 @@ entry points under the list.
 - **`blocking/`** — nine modules, all exercised by tests: four blocker families (`standard` exact
   keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them and computes pair
   completeness / reduction ratio), `pairs.py` (the packed-int64 representation), `base.py` (the
-  `Blocker` contract), `defaults.py` (the shared blocker set and `block_split`, the runner every
-  later stage uses) and `evaluate.py` (the CLI). `tests/test_blocking_defaults.py` now imports
-  `defaults.py` by name, pinning its literal defaults against every committed report; `evaluate.py`
-  and `model/train.prepare` still reach it too. Union pair completeness
+  `Blocker` contract), `defaults.py` (the shared blocker set, `block_split` the runner every
+  evaluation stage uses, and `block_unlabeled` its labels-free twin for a real batch catalog --
+  `block_split`'s `ground_truth` call raises on a record with no `entity_id`, which is what every
+  record `service/batch.py` scores has) and `evaluate.py` (the CLI). `tests/test_blocking_defaults.py`
+  imports `defaults.py` by name, pinning its literal defaults against every committed report and
+  `block_unlabeled` against `block_split`'s candidate set; `evaluate.py`, `model/train.prepare` and
+  `service/batch.py` reach it too. Union pair completeness
   **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
   Result committed at `reports/blocking.md`. `default_blocker_set(ann_components=..., ann_neighbours=...,
   lsh_max_neighbours=...)` projects `ann` with SVD for a catalog past its dense memory budget,
@@ -83,7 +86,11 @@ entry points under the list.
   can never reorder pairs. Every interpretive sentence in the report is chosen from the measured
   value rather than printed unconditionally, and a synthetic report exercises the branches
   Abt-Buy never reaches — a claim true on one dataset and asserted regardless is false on the
-  next.
+  next. `PairScorer` gained `.save`/`.load`/`read_scorer_manifest`: pickle plus a hash-and-manifest
+  pattern mirroring `data/synthetic.py`'s (refuse a missing manifest, a hash mismatch, or a
+  feature-name mismatch against a differently-shaped featurizer), and `model/evaluate.py` gained
+  `--save-scorer` so the CLI that already fits a calibrated scorer is the only place that persists
+  one — `service/batch.py` only ever loads.
 - **`cluster/`** — six modules: `base.py` (`ScoredGraph`, and `expected_partition_cost` — the
   bands' cost model applied to every pair a partition decides: merged pairs at `(1-p)·C_fm`,
   pairs left apart falling back to review or rejection, pairs blocking never emitted at p = 0),
@@ -185,8 +192,37 @@ and a directory absent because `data/` is gitignored), plus a check that walks t
 asserting no module outside `data/` imports a loader. That last one guards the rule rather than the
 plumbing, and a stage added later inherits it by existing.
 
-`service/` is the one remaining bare directory: an `__init__.py` whose entire content is a
-docstring, and no modules.
+`service/` v1 is implemented: batch dedup + a review queue, both tested, both run against real
+Abt-Buy data for this sync. Five modules -- `store.py` (DuckDB schema: `runs`/`clusters`/`records`/
+`review_queue`, connection and typed read/write helpers, no pydantic or FastAPI), `batch.py`
+(`run_batch` -- blocking via the new `blocking.defaults.block_unlabeled` (below), scoring, average
+linkage -- plus its CLI, the only writer of every table), `schemas.py` (API pydantic models),
+`review.py` (`record_decision`, the not-found/already-decided rule, testable with no `TestClient`)
+and `app.py` (the FastAPI app; batch execution stays CLI-only by design -- blocking through
+clustering can take minutes at scale, and background-job infrastructure is out of scope). Online
+lookup -- CLAUDE.md's second opening question, "given one new record" -- is deliberately still
+deferred: every blocker rebuilds its index from scratch per call with no build/query split, and
+`cluster/` takes a whole graph in and returns a whole label array out, so nothing here can answer
+it yet. `PairScorer` gained `.save`/`.load`/`read_scorer_manifest` (`model/train.py`, pickle plus a
+hash-and-manifest pattern mirroring `data/synthetic.py`'s) and `model/evaluate.py` gained
+`--save-scorer` so the CLI that fits a calibrated scorer is the only place that persists one.
+`block_split()`'s ground-truth call (`eval.splits.group_by_entity`) raises on a record with no
+`entity_id` -- correct for evaluation, wrong for a real batch catalog where nobody knows the
+answer yet -- so `block_unlabeled()` is `service/batch.py`'s entry point instead, sharing
+`default_blocker_set()` rather than a second, driftable blocker list.
+
+One correctness point worth recording because a smoke run against real Abt-Buy data confirmed it
+rather than just asserting it: the review queue is populated from `cluster.base.review_mask`, not
+`model.threshold.assign_bands(...).review` -- on that run the two counts genuinely differ (43
+candidate-level review-band pairs against 87 queued), because a clustering partition can merge a
+pair the bands would have queued or leave apart one they would have auto-merged
+(`cluster/base.py`'s own documented fact). Using `assign_bands` for the queue would have produced
+one inconsistent with the clusters the same run returns.
+
+Not yet built: the htmx review UI (CLAUDE.md's stack choices still name it; v1 is JSON API only,
+by agreed scope), and reconciling entity identity across repeated runs (`cluster_id` is
+`f"{run_id}:{label}"`, stable within one run, not a persistent identity -- deferred with online
+lookup, which is what would need it).
 
 All four of the second audit's findings are now closed: the `blocking-200k.md`
 ceiling-vs-lower-bound claim, the seed-provenance / seed-dataset gaps in `synth/generate.py` and
@@ -208,13 +244,16 @@ tested (k=10→50→100→150: PC 0.0597→0.2225→0.3805→0.5000; LSH cap=100
 budget on this catalog, not a plateau — pushing either further is available, measured work, not a
 blocker. `default_blocker_set`'s literal defaults are unchanged (`k=10`, unbounded LSH — what
 every Abt-Buy/`synth-20k` report was measured with); both new parameters apply only via the
-explicit CLI flags on `synth-200k`'s own committed command. `service/` answers online lookups
-through that same index over a large catalog, and it serves entities `cluster/` builds from
-blocking's candidates — it was waiting on candidates flowing at scale, not on a specific
-completeness figure, and that is now true. Next is `service/`, alongside two passes independent of
+explicit CLI flags on `synth-200k`'s own committed command.
+
+`service/` v1 — batch dedup and a review queue — is now built (see the `service/` bullet above);
+`PairScorer` persistence landed with it. What is still not built is the other half of `service/`'s
+two questions: **online lookup**, answering "given one new record" through an index over a large
+catalog kept warm between requests, which is what CLAUDE.md's Layout line and stack choices still
+describe and v1 deliberately does not attempt — no blocker exposes a build/query split, and
+`cluster/` has no incremental-partition path. That is next, alongside one pass still independent of
 it: an `error-analyst` pass over `model/` and `features/` — the fusions surviving clustering on
-both datasets, and `synth-20k`'s P@10 of 0.000 — and a persisted `PairScorer`, which `service/`
-needs regardless.
+both datasets, and `synth-20k`'s P@10 of 0.000.
 
 `model/` answered the comparison the project is built around: **test F1 0.8934** against the
 baseline's 0.5204, at a threshold chosen on train and spent on test. Read `reports/model.md` before
@@ -271,7 +310,10 @@ settled against more data rather than treated as decided:
   (1 - 0.91)·20 = 1.8, so any closing edge above 0.90 merges. Billed as one merge decision it
   would cost one review and be queued. Neither cost-based row merges such a pair on the Abt-Buy
   test split, and no test pins the case. Settle it with `service/`'s review queue: measured time
-  per merge decision against cluster size.
+  per merge decision against cluster size. That measurement is now instrumentable, not answered:
+  `service/store.py`'s `review_queue` table carries `left_cluster_id`/`right_cluster_id` and
+  `created_at`/`decided_at` on every row, so "time per decision against the pair's cluster sizes"
+  is a query away once real review decisions accumulate -- nobody has made one yet.
 - **`synth/`'s entity sizes and structure are judgment calls, not measurements.** Sizes run 40%
   singletons, 30% pairs, 15% triples and 15% from four to eight records, because Abt-Buy has only
   pairs and triples and the p = 0 question below needs larger entities; nothing grounds the
@@ -612,7 +654,9 @@ src/dedup/
                   agglomerative, correlation + evaluate — the CLI behind reports/cluster.md
   synth/          families (seed product -> siblings), corrupt (product -> listings), generate
                   (the catalog and its CLI), realism (seed against synthetic difficulty)
-  service/        FastAPI app, HNSW + inverted index, review queue
+  service/        store (DuckDB schema/connection), batch (run_batch + its CLI), schemas
+                  (API models), review (decision logic), app (FastAPI) -- online lookup
+                  (HNSW + inverted index) still deferred
 reports/          blocking table, PR curves, cost curves — the defensible results
   baseline_tfidf.md   the TF-IDF number every later stage is measured against
   blocking.md         blocker x completeness x reduction; the union row is the recall ceiling
@@ -647,7 +691,12 @@ reason: either number alone is trivially gamed by moving the threshold.
 - `sentence-transformers` embeddings are complementary to string distance, not a replacement: they catch
   paraphrase and miss fine distinctions (`WH-1000XM4` vs `WH-1000XM5`), string metrics do the opposite.
 - LightGBM over the pair features; a fine-tuned cross-encoder is the optional ceiling comparison.
-- DuckDB/SQLite record store, FastAPI + uvicorn, htmx review UI (deliberately no Node toolchain).
+- **DuckDB**, settled over SQLite for the record store: already an explicit dependency (SQLite
+  needs none, being stdlib, which was the case *for* it), and a better fit for the analytical
+  queries a review queue and batch-run reporting run (aggregates over bands, cluster sizes) than a
+  small transactional workload SQLite would suit better. FastAPI + uvicorn. The htmx review UI is
+  still unbuilt -- `service/` v1 is a JSON API only, by scope; DuckDB/FastAPI/uvicorn are proven
+  against real Abt-Buy data, htmx is not (deliberately no Node toolchain, when it lands).
 
 ## Data
 
@@ -720,7 +769,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (593 passing, 1 skipped)
+pytest                                  # all (623 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -743,11 +792,19 @@ python -m dedup.features.evaluate --dataset abt-buy --out reports/features.md
 
 # the model: F1 against the baseline, calibration quality, cost-derived bands
 # --cost-false-merge / --cost-false-split / --cost-review override the 20 : 2 : 1 default
-python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md
+# --save-scorer persists the fitted, calibrated PairScorer service/batch.py loads
+python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md --save-scorer artifacts/scorer
 
 # clusters: B-cubed per clusterer, the chaining demonstration, what each fix undid
 # --restarts sets correlation clustering's pivot orders; --cost-* as for the model
 python -m dedup.cluster.evaluate --dataset abt-buy --out reports/cluster.md
+
+# batch dedup + review queue: blocking -> scoring -> average-linkage clustering over a
+# catalog with no ground truth, written to a DuckDB file; --cost-* as for the model
+python -m dedup.service.batch --dataset abt-buy --scorer artifacts/scorer --db data/service.duckdb
+
+# the review API over that same DuckDB file (DEDUP_DB_PATH, or pass db_path to create_app)
+DEDUP_DB_PATH=data/service.duckdb uvicorn dedup.service.app:app --reload
 
 # synthetic catalogs, seeded from Abt-Buy's train split (data/synth/ is gitignored)
 python -m dedup.synth.generate --seed-dataset abt-buy --records 20000 --out data/synth/abt-buy-train-20k --report reports/synth/realism.md
@@ -791,13 +848,6 @@ If `tests/fixtures/abt-buy/` ever needs a new shape, regenerate it rather than h
 python tests/fixtures/make_fixtures.py
 ```
 
-Not built yet — intended contract, will fail if invoked:
-
-```bash
-# service
-uvicorn dedup.service.app:app --reload
-```
-
 ## Commit Messages
 
 Use Conventional Commits format for every commit:
@@ -815,9 +865,8 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`, `eval`, `features`, `model`, `cluster`, `data-gen` (the `synth/` generator). Reserved for
-modules not yet built: `service`. A commit touching no single module (this file, packaging, CI)
-takes no scope.
+`blocking`, `eval`, `features`, `model`, `cluster`, `data-gen` (the `synth/` generator), `service`.
+A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:
 

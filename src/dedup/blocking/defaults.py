@@ -76,8 +76,29 @@ def block_split(records: Sequence[NormalizedRecord]) -> tuple[BlockerRun, Blocke
     pairs are all negatives by construction -- the entities were assigned to
     one side or the other -- so this loses no positives, and it keeps the
     packed pair indices meaningful as positions in this record list.
+
+    Requires every record to carry `entity_id` -- `ground_truth` calls
+    `eval.splits.group_by_entity`, which raises rather than silently scoring
+    an unlabeled record. That is correct for evaluation, where the point is
+    to check candidates against a known answer, and wrong for a genuine batch
+    catalog with no known answer yet. `block_unlabeled` below is that catalog's
+    entry point.
     """
     runs = [blocker.run(records) for blocker in default_blocker_set()]
     combined = union_run(runs)
     truth, n_true = ground_truth(records)
     return combined, score(combined, truth, len(records), n_true_pairs_total=n_true)
+
+
+def block_unlabeled(records: Sequence[NormalizedRecord]) -> BlockerRun:
+    """`block_split`'s candidate generation, without the ground-truth scoring on top.
+
+    For a catalog `service/` actually serves: every record's `entity_id` is
+    `None`, because nobody knows the answer yet -- that is the whole question
+    batch dedup exists to answer. `block_split` cannot run on this input
+    (`ground_truth` raises), and duplicating its blocker list here instead of
+    calling `default_blocker_set()` is exactly the train/serve skew CLAUDE.md's
+    `code_key` anecdote warns about: two implementations that must agree.
+    """
+    runs = [blocker.run(records) for blocker in default_blocker_set()]
+    return union_run(runs)

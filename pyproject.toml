@@ -40,6 +40,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "httpx",  # fastapi.testclient.TestClient needs it; installed transitively
+    # via fastapi/uvicorn today, declared so tests don't rely on that luck
 ]
 
 [tool.setuptools.packages.find]
