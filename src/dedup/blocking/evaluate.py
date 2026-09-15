@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from dedup.blocking.ann import DEFAULT_NEIGHBOURS as ANN_DEFAULT_NEIGHBOURS
 from dedup.blocking.base import Blocker, BlockerRun
 from dedup.blocking.defaults import default_blocker_set
 from dedup.blocking.pairs import total_pairs, unpack
@@ -262,6 +263,20 @@ def main(argv: list[str] | None = None) -> int:
         "outgrows its memory budget, and it changes ann's candidates",
     )
     parser.add_argument(
+        "--ann-neighbours",
+        type=int,
+        default=None,
+        help="override ann's HNSW neighbour count k -- needed once a projection's neighbourhoods "
+        f"outgrow the default {ANN_DEFAULT_NEIGHBOURS}, and it changes ann's candidates",
+    )
+    parser.add_argument(
+        "--lsh-max-neighbours",
+        type=int,
+        default=None,
+        help="cap lsh's candidates per record -- needed once unbounded LSH outgrows a single "
+        "array allocation, and any record over the cap loses its candidates entirely",
+    )
+    parser.add_argument(
         "--without",
         action="append",
         default=[],
@@ -273,7 +288,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     records = [normalize(record) for record in load_dataset(args.dataset, args.root)]
-    blockers = default_blocker_set(ann_components=args.ann_components)
+    blockers = default_blocker_set(
+        ann_components=args.ann_components,
+        ann_neighbours=(
+            ANN_DEFAULT_NEIGHBOURS if args.ann_neighbours is None else args.ann_neighbours
+        ),
+        lsh_max_neighbours=args.lsh_max_neighbours,
+    )
     for prefix in args.without:
         if not any(blocker.name.startswith(prefix) for blocker in blockers):
             parser.error(f"--without {prefix!r} matches no default blocker")
@@ -285,6 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         omitted=omitted,
     )
     flags = "" if args.ann_components is None else f" --ann-components {args.ann_components}"
+    flags += "" if args.ann_neighbours is None else f" --ann-neighbours {args.ann_neighbours}"
+    flags += (
+        ""
+        if args.lsh_max_neighbours is None
+        else f" --lsh-max-neighbours {args.lsh_max_neighbours}"
+    )
     flags += "".join(f" --without {prefix}" for prefix in args.without)
     markdown = render_markdown(
         report,

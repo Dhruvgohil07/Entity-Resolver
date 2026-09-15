@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Nine stages implemented (`pytest` → 582 passing, 1 skipped; 94% line coverage). Two things
+Nine stages implemented (`pytest` → 593 passing, 1 skipped; 94% line coverage). Two things
 are **not** covered by that run, and both are called out where they belong rather than folded into
 the count: the `semantic.py` carve-out inside the `features/` bullet, and the five report CLI
 entry points under the list.
@@ -46,13 +46,17 @@ entry points under the list.
   keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them and computes pair
   completeness / reduction ratio), `pairs.py` (the packed-int64 representation), `base.py` (the
   `Blocker` contract), `defaults.py` (the shared blocker set and `block_split`, the runner every
-  later stage uses) and `evaluate.py` (the CLI). No test imports `defaults.py` by name; it is
-  reached, at 100% line coverage, through the names `blocking/evaluate.py` and
-  `features/evaluate.py` re-export and through `model/train.prepare`. Union pair completeness
+  later stage uses) and `evaluate.py` (the CLI). `tests/test_blocking_defaults.py` now imports
+  `defaults.py` by name, pinning its literal defaults against every committed report; `evaluate.py`
+  and `model/train.prepare` still reach it too. Union pair completeness
   **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
-  Result committed at `reports/blocking.md`. `default_blocker_set(ann_components=...)` projects
-  `ann` with SVD for a catalog past its dense memory budget, and the CLI's `--without` leaves a
-  blocker out and names it in the report; `None` and no omission are the committed set.
+  Result committed at `reports/blocking.md`. `default_blocker_set(ann_components=..., ann_neighbours=...,
+  lsh_max_neighbours=...)` projects `ann` with SVD for a catalog past its dense memory budget,
+  raises `ann`'s HNSW neighbour count `k` for a catalog whose sibling families crowd out the
+  default, and caps `lsh`'s per-record candidate count for a catalog whose unbounded LSH output
+  outgrows a single array allocation; the CLI's `--without` leaves a blocker out and names it in
+  the report. `None`/`ANN_DEFAULT_NEIGHBOURS`/`None` (no projection, k=10, unbounded) and no
+  omission are the committed set every report at Abt-Buy and `synth-20k` scale was measured with.
 - **`features/`** — seven modules: `base.py` (the `FeatureSpec` / `FeatureMatrix` contract),
   `string.py`, `numeric.py`, `semantic.py` and `missingness.py` (the blocks), `vectorize.py`
   (`PairFeaturizer`, fit/transform), and `evaluate.py` (the CLI). **33 columns** (34 with the
@@ -188,18 +192,27 @@ All four of the second audit's findings are now closed: the `blocking-200k.md`
 ceiling-vs-lower-bound claim, the seed-provenance / seed-dataset gaps in `synth/generate.py` and
 `data/synthetic.py`, the synthetic baseline's unmeasured "does not transfer" claim, and the
 uncommitted one-off figures (re-verified rather than promoted to a committed report, with one
-genuine error corrected -- see above). Next is **blocking at scale**, not `service/`. `synth/` brought measured evidence to all four decisions
-it was built for — some settled, some reopened (see Open questions) — and its sharpest finding is
-that blocking is where the pipeline breaks. The default set reaches pair completeness 0.9238 on
-`synth-20k`; on `synth-200k` it cannot run at all, because token LSH exhausts memory, and the
-blockers that can — with `ann` behind SVD-128, where it falls to 0.0597 — reach **0.6712**. That
-is a lower bound on the default set's ceiling rather than the ceiling, since the omitted blocker
-could only add pairs. `service/` answers online lookups through that same index over a large
-catalog, and it serves entities `cluster/` builds from blocking's candidates, so it cannot be
-evaluated at scale before blocking has candidates flowing at scale. The measured lever is `ann`'s
-neighbour count alongside the projection (the settled `ann` entry), plus a memory bound on LSH's
-candidate generation. Two passes are independent of
-that: an `error-analyst` pass over `model/` and `features/` — the fusions surviving clustering on
+genuine error corrected -- see above). **Blocking at scale is now closed too.** `synth/` brought
+measured evidence to all four decisions it was built for — some settled, some reopened (see Open
+questions) — and its sharpest finding was that blocking is where the pipeline breaks: the default
+set reaches pair completeness 0.9238 on `synth-20k`, but on `synth-200k` it could not run at all,
+because unbounded token LSH accumulated more raw candidate pairs than a single array allocation
+could hold. The two measured levers CLAUDE.md named — `ann`'s neighbour count alongside the
+projection, and a memory bound on LSH's candidate generation — both work: raising `ann`'s `k` to
+150 (behind the same SVD-128 projection) and capping `lsh` at 500 candidates per record lets every
+default blocker run on `synth-200k` for the first time, no `--without`, no OOM, reaching union pair
+completeness **0.8469** — a real ceiling, not a lower bound (`reports/synth/blocking-200k.md`).
+Neither sweep is exhausted: both `k` and the LSH cap were still raising PC at the last value
+tested (k=10→50→100→150: PC 0.0597→0.2225→0.3805→0.5000; LSH cap=100→300→500: PC
+0.0871→0.3201→0.4042), so 0.8469 is what two swept-not-tuned parameters reach at a practical time
+budget on this catalog, not a plateau — pushing either further is available, measured work, not a
+blocker. `default_blocker_set`'s literal defaults are unchanged (`k=10`, unbounded LSH — what
+every Abt-Buy/`synth-20k` report was measured with); both new parameters apply only via the
+explicit CLI flags on `synth-200k`'s own committed command. `service/` answers online lookups
+through that same index over a large catalog, and it serves entities `cluster/` builds from
+blocking's candidates — it was waiting on candidates flowing at scale, not on a specific
+completeness figure, and that is now true. Next is `service/`, alongside two passes independent of
+it: an `error-analyst` pass over `model/` and `features/` — the fusions surviving clustering on
 both datasets, and `synth-20k`'s P@10 of 0.000 — and a persisted `PairScorer`, which `service/`
 needs regardless.
 
@@ -334,20 +347,40 @@ Settled by measurement, recorded so it is not re-litigated:
   reproduces by running `blocking.evaluate --dataset synth-200k --ann-components 128` without
   `--without`. Re-verified 2026-09-14: every marginal-candidate, marginal-PC and character-shingle
   figure in both tables above reproduced exactly.
-- **`ann` is the load-bearing blocker.** faiss HNSW over char-3gram TF-IDF reaches PC 0.9562 alone,
-  beating every exact-key blocker combined, because it needs no shared token at all — it is what
-  catches `Bose 161WH` against `Boss 161 Speaker`, a source typo in the brand. Its index is built
-  **single-threaded on purpose**: parallel HNSW construction gave 14,608 / 14,603 / 14,602
+- **`ann` is the load-bearing blocker, and raising its neighbour count `k` at scale is a real,
+  swept-not-tuned lever, now committed.** faiss HNSW over char-3gram TF-IDF reaches PC 0.9562 alone
+  on Abt-Buy, beating every exact-key blocker combined, because it needs no shared token at all —
+  it is what catches `Bose 161WH` against `Boss 161 Speaker`, a source typo in the brand. Its index
+  is built **single-threaded on purpose**: parallel HNSW construction gave 14,608 / 14,603 / 14,602
   candidates across three runs of identical input, and a committed report whose numbers drift is not
   reproducible. Its dense index does not scale, and SVD alone is not the fix. On `synth-20k`,
   projecting to 128 components at the same `k=10` halves its completeness, 0.7705 to 0.3897, at the
-  same candidate count; raising `k` to 50 recovers it to 0.8187 for 631,673 candidates. At
-  `synth-200k`, SVD-128 with `k=10` reaches 0.0597, with ten neighbours crowded out by sibling
-  families about 99 entities wide — so scaling `ann` means raising `k` with the projection, and
-  `default_blocker_set` changes neither until that is measured at 200k. The SVD-128 figures at
-  `k=10` and `k=50` on `synth-20k` are one-off measurements, not a committed report; the 0.0597 at
-  `synth-200k` is in `reports/synth/blocking-200k.md`. Re-verified 2026-09-14: both `synth-20k`
-  figures reproduced exactly (PC 0.3897 at `k=10`, PC 0.8187 for 631,673 candidates at `k=50`).
+  same candidate count; raising `k` to 50 recovers it to 0.8187 for 631,673 candidates (re-verified
+  2026-09-14, reproduced exactly; these two remain one-off measurements, not a committed report).
+  At `synth-200k`, SVD-128 with `k=10` reaches only 0.0597, with ten neighbours crowded out by
+  sibling families about 99 entities wide — so scaling `ann` means raising `k` with the projection.
+  `default_blocker_set(ann_neighbours=...)` now exposes `k` as a parameter, mirroring
+  `ann_components`, and a full sweep at `synth-200k` is committed: `k`=10/50/100/150 give PC
+  0.0597/0.2225/0.3805/0.5000, still climbing at `k`=150 — not a plateau, a practical stopping
+  point (`reports/synth/blocking-200k.md`). `default_blocker_set`'s literal default stays `k=10`,
+  what every Abt-Buy/`synth-20k` report was measured with; a larger catalog spends a higher `k`
+  explicitly via `--ann-neighbours`.
+- **A memory bound on `lsh`'s candidate generation is the other lever, and it also works.**
+  Unbounded token LSH cannot run at all on `synth-200k`: 222M raw candidate pairs failed a 1.66 GiB
+  allocation, because nothing capped how many candidates one record's query could contribute before
+  they were all accumulated into one array. `MinHashLSHBlocker(max_neighbours=...)` bounds it the
+  way `standard.py`'s `max_block_size` bounds a runaway exact-key block — a record whose query
+  returns more than the cap contributes zero candidates, counted and surfaced as a warning, same
+  shape as a dropped block. Swept at `synth-200k`: cap=100/300/500 give PC 0.0871/0.3201/0.4042,
+  dropping 138,364/85,041/61,611 of 165,714 records respectively — real completeness, real cost,
+  still climbing at cap=500, not exhausted. `default_blocker_set`'s literal default stays `None`
+  (unbounded), what every Abt-Buy/`synth-20k` report — including the one recording the OOM — was
+  measured with; a catalog past that budget spends a cap explicitly via `--lsh-max-neighbours`.
+  Combined with `ann` at `k`=150, every default blocker now runs on `synth-200k` for the first
+  time — no `--without`, no OOM — reaching union pair completeness **0.8469**
+  (`reports/synth/blocking-200k.md`), against 0.6712 with `lsh` omitted entirely. Neither lever was
+  pushed to its limit; both are available, measured, swept-not-tuned levers for whoever revisits
+  this ceiling.
 - **What blocking still misses is a different identifier system, not a near-miss.** Of 1,118 true
   pairs, 8 survive nothing. They are two failure modes, and neither is fixable by tuning a window or
   a threshold: (a) vendor SKU against distributor part number — `Canon Color Ink Tank - CL41CL` vs
@@ -687,7 +720,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (582 passing, 1 skipped)
+pytest                                  # all (593 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -724,8 +757,10 @@ python -m dedup.synth.generate --seed-dataset abt-buy --records 200000 --out dat
 python -m dedup.eval.baseline --dataset synth-20k --min-similarity 0.2 --out reports/synth/baseline_tfidf.md
 python -m dedup.model.evaluate --dataset synth-20k --out reports/synth/model.md
 
-# past the dense ann budget: --ann-components projects with SVD, --without leaves a blocker out
-python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --without lsh --out reports/synth/blocking-200k.md
+# past the dense ann budget: --ann-components projects with SVD, --ann-neighbours raises k for
+# a catalog whose sibling families crowd out the default, --lsh-max-neighbours bounds lsh's
+# memory, --without leaves a blocker out
+python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --ann-neighbours 150 --lsh-max-neighbours 500 --out reports/synth/blocking-200k.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.

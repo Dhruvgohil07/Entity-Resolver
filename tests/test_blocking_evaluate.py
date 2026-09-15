@@ -267,6 +267,21 @@ def test_the_regenerate_command_reproduces_the_run(catalog):
     assert "--dataset synthetic --ann-components 8 --out reports/synth/blocking.md" in markdown
 
 
+def test_the_regenerate_command_includes_the_scale_flags(catalog):
+    # ann_neighbours and lsh_max_neighbours are the two levers blocking at
+    # scale needs; a regenerate command missing either is not reproducible.
+    report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
+    markdown = render_markdown(
+        report,
+        out="reports/synth/blocking-200k.md",
+        flags=" --ann-components 128 --ann-neighbours 50 --lsh-max-neighbours 100",
+    )
+    assert (
+        "--dataset synthetic --ann-components 128 --ann-neighbours 50 "
+        "--lsh-max-neighbours 100 --out reports/synth/blocking-200k.md"
+    ) in markdown
+
+
 # ---------------------------------------------------------------------------
 # Against the real benchmark (skipped unless downloaded)
 # ---------------------------------------------------------------------------

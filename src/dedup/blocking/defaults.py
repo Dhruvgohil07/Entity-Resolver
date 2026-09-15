@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from dedup.blocking.ann import DEFAULT_NEIGHBOURS as ANN_DEFAULT_NEIGHBOURS
 from dedup.blocking.ann import AnnBlocker
 from dedup.blocking.base import Blocker, BlockerRun
 from dedup.blocking.lsh import MinHashLSHBlocker
@@ -25,7 +26,11 @@ from dedup.blocking.union import BlockerScore, ground_truth, score, union_run
 from dedup.normalize import NormalizedRecord
 
 
-def default_blocker_set(ann_components: int | None = None) -> list[Blocker]:
+def default_blocker_set(
+    ann_components: int | None = None,
+    ann_neighbours: int = ANN_DEFAULT_NEIGHBOURS,
+    lsh_max_neighbours: int | None = None,
+) -> list[Blocker]:
     """Every blocker, including the ones measurement says do not earn their place.
 
     `lsh` contributes zero marginal completeness on this benchmark and
@@ -39,12 +44,28 @@ def default_blocker_set(ann_components: int | None = None) -> list[Blocker]:
     and so the recall ceiling every later stage inherits, and a ceiling that
     moves because the catalog grew past a threshold is one nobody chose.
     `None` is the set every committed report was measured with.
+
+    `ann_neighbours` is the same kind of parameter for `ann`'s neighbour count
+    `k`. At `synth-200k` behind SVD-128, `k=10` reaches pair completeness only
+    0.0597 -- ten neighbours get crowded out by sibling families roughly 99
+    entities wide -- so scaling `ann` means raising `k` alongside the
+    projection. `ANN_DEFAULT_NEIGHBOURS` (10) is what every committed report
+    was measured with; a larger catalog spends this explicitly, never by a
+    silent size-triggered default.
+
+    `lsh_max_neighbours` bounds `lsh`'s memory the way `standard.py`'s
+    `max_block_size` bounds a runaway exact-key block: at 200k records,
+    unbounded LSH accumulates more raw candidate pairs than a single array
+    allocation can hold (222M pairs, a failed 1.66 GiB allocation). `None`
+    (unbounded) is what every committed report -- including the one recording
+    that failure -- was measured with; a catalog past that budget spends a
+    cap explicitly.
     """
     return [
         *default_blockers(),
         SortedNeighborhoodBlocker(window=20),
-        MinHashLSHBlocker(threshold=0.4, shingles="token"),
-        AnnBlocker(neighbours=10, n_components=ann_components),
+        MinHashLSHBlocker(threshold=0.4, shingles="token", max_neighbours=lsh_max_neighbours),
+        AnnBlocker(neighbours=ann_neighbours, n_components=ann_components),
     ]
 
 
