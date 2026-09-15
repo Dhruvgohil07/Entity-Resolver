@@ -5,9 +5,11 @@ maps `store.py` rows into these, and `review.py`'s exceptions into status codes.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel
+
+from dedup.schema import SourceName
 
 T = TypeVar("T")
 
@@ -80,3 +82,25 @@ class ReviewQueueItem(BaseModel):
 class ReviewDecisionRequest(BaseModel):
     is_match: bool
     reviewer_id: str | None = None
+
+
+class LookupRequest(BaseModel):
+    """`schema.Record`'s fields, minus `record_id`/`entity_id` -- the service
+    assigns the first (or accepts a caller-supplied one) and always sets the
+    second to `None`, since resolving that is the whole question a lookup
+    answers."""
+
+    source: SourceName
+    title: str
+    description: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    price: float | None = None
+    record_id: str | None = None  # generated if omitted
+
+
+class LookupResult(BaseModel):
+    decision: Literal["auto_merge", "review", "new_cluster"]
+    record: RecordOut
+    cluster: ClusterSummary
+    secondary_reviews: list[ReviewQueueItem]

@@ -5,7 +5,7 @@ depend on this module without depending on each other, which is what keeps the
 CLI that populates the store and the app that serves it from needing to agree
 on anything beyond this file's row shapes.
 
-Four tables, one batch run per `runs` row:
+Five tables, one batch run per `runs` row:
 
   * **`runs`** -- one row per invocation: dataset, the scorer artifact's hash
     (traceable back to the report that produced it, per CLAUDE.md's standard),
@@ -40,6 +40,19 @@ Four tables, one batch run per `runs` row:
     right_record_id)` plus `review.py`'s already-decided check keep a row
     that may already have been read as a training label from being silently
     overwritten.
+  * **`run_indexes`** -- one row per run that has opted into online lookup
+    (`service/build_index.py`), naming the persisted `AnnIndex`/`InvertedIndex`
+    directories the same way `runs.scorer_root` already names a `PairScorer`'s:
+    a caller-chosen filesystem path, independent of where the DuckDB file
+    itself lives. `apply_lookup` (below) is what a run accepting a lookup
+    actually changes: `runs`' live counts update on every call (the
+    alternative -- freezing them at batch time -- would make `GET
+    /runs/{id}` silently wrong for any run that has ever accepted one), and
+    `clusters`/`records` gain rows outside `write_run`'s one-shot insert.
+    **A run that has accepted a lookup is no longer reproducible from
+    `service/batch.py`'s CLI**: at least one of its cluster labels was minted
+    by insertion order (`service/lookup.py`'s decision logic), not by
+    `cluster.base.canonical_labels` over a full graph.
 """
 
 from __future__ import annotations
@@ -111,6 +124,19 @@ CREATE TABLE IF NOT EXISTS review_queue (
     reviewer_id       VARCHAR,
     decided_at        TIMESTAMP,
     UNIQUE (run_id, left_record_id, right_record_id)
+);
+
+-- Online lookup (service/lookup.py, service/build_index.py): a separate table,
+-- not new columns on `runs` -- `CREATE TABLE IF NOT EXISTS` cannot retroactively
+-- add a column to an existing table, so extending `runs` directly would silently
+-- break every DB file created before this change. No row exists for a run until
+-- `build_index` explicitly enables lookup for it; a plain batch run stays exactly
+-- as immutable-looking as before until someone opts in.
+CREATE TABLE IF NOT EXISTS run_indexes (
+    run_id         VARCHAR PRIMARY KEY REFERENCES runs(run_id),
+    ann_root       VARCHAR NOT NULL,
+    standard_root  VARCHAR NOT NULL,
+    built_at       TIMESTAMP NOT NULL
 );
 """
 
@@ -411,6 +437,23 @@ def list_clusters(
     return [_cluster_row(r) for r in rows], total
 
 
+def get_clusters_by_ids(
+    conn: duckdb.DuckDBPyConnection, run_id: str, cluster_ids: Sequence[str]
+) -> list[ClusterRow]:
+    """Batch fetch -- `service/lookup.py` needs every candidate cluster's
+    *total* size (not just how many of its members blocking surfaced as
+    candidates) to price a merge against `cluster/base.merge_credit`'s real
+    objective, mirroring `get_records_by_ids`'s shape."""
+    if not cluster_ids:
+        return []
+    placeholders = ", ".join("?" for _ in cluster_ids)
+    rows = conn.execute(
+        f"SELECT * FROM clusters WHERE run_id = ? AND cluster_id IN ({placeholders})",
+        [run_id, *cluster_ids],
+    ).fetchall()
+    return [_cluster_row(r) for r in rows]
+
+
 def _review_row(row: tuple) -> ReviewQueueRow:
     return ReviewQueueRow(
         review_id=row[0],
@@ -475,4 +518,237 @@ def decide_review(
         "UPDATE review_queue SET is_match = ?, reviewer_id = ?, decided_at = ? "
         "WHERE run_id = ? AND review_id = ?",
         [is_match, reviewer_id, datetime.now(UTC), run_id, review_id],
+    )
+
+
+def iter_records(conn: duckdb.DuckDBPyConnection, run_id: str) -> list[RecordRow]:
+    """Every record in `run_id`, in `position` order -- `service/build_index.py`'s
+    reader. Unpaginated on purpose: building an index needs the whole run's
+    catalog, not a page of it, and it runs as a CLI, not a request handler."""
+    rows = conn.execute(
+        "SELECT * FROM records WHERE run_id = ? ORDER BY position", [run_id]
+    ).fetchall()
+    return [_record_row(r) for r in rows]
+
+
+def get_records_by_ids(
+    conn: duckdb.DuckDBPyConnection, run_id: str, record_ids: Sequence[str]
+) -> list[RecordRow]:
+    """Batch fetch -- `service/lookup.py` scoring a new record against a
+    handful of ann/inverted-index candidates, not one `get_record` per id."""
+    if not record_ids:
+        return []
+    placeholders = ", ".join("?" for _ in record_ids)
+    rows = conn.execute(
+        f"SELECT * FROM records WHERE run_id = ? AND record_id IN ({placeholders})",
+        [run_id, *record_ids],
+    ).fetchall()
+    return [_record_row(r) for r in rows]
+
+
+@dataclass(frozen=True)
+class RunIndexesRow:
+    run_id: str
+    ann_root: str
+    standard_root: str
+    built_at: datetime
+
+
+def get_run_indexes(conn: duckdb.DuckDBPyConnection, run_id: str) -> RunIndexesRow | None:
+    row = conn.execute(
+        "SELECT * FROM run_indexes WHERE run_id = ?", [run_id]
+    ).fetchone()
+    if row is None:
+        return None
+    return RunIndexesRow(run_id=row[0], ann_root=row[1], standard_root=row[2], built_at=row[3])
+
+
+def set_run_indexes(
+    conn: duckdb.DuckDBPyConnection, run_id: str, *, ann_root: str, standard_root: str
+) -> None:
+    """`service/build_index.py`'s one write -- upsert, since rebuilding an
+    already-enabled run's indexes (after a lookup, or from scratch) is a
+    legitimate re-run, not an error."""
+    conn.execute(
+        "INSERT INTO run_indexes VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET "
+        "ann_root = excluded.ann_root, standard_root = excluded.standard_root, "
+        "built_at = excluded.built_at",
+        [run_id, ann_root, standard_root, datetime.now(UTC)],
+    )
+
+
+@dataclass(frozen=True)
+class ReviewTarget:
+    """One existing cluster a looked-up record should be queued against --
+    the specific existing record whose score decided it (`review_queue`
+    always names real records, never bare cluster ids), and that score."""
+
+    cluster_id: str
+    record_id: str
+    probability: float
+
+
+@dataclass(frozen=True)
+class LookupWriteResult:
+    """What `apply_lookup` wrote: the new record's own row, and every
+    `review_queue` row created for it -- returned directly rather than
+    making the caller re-query for "the reviews this lookup just created,"
+    which would otherwise mean fetching a whole page of the run's pending
+    queue and filtering it in memory, and could miss rows past that page."""
+
+    record: RecordRow
+    review_rows: list[ReviewQueueRow]
+
+
+def apply_lookup(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: str,
+    *,
+    record: NormalizedRecord,
+    record_id: str,
+    merge_cluster_id: str | None,
+    review_targets: Sequence[ReviewTarget],
+    n_auto_merge_candidates: int,
+    n_review_candidates: int,
+    n_auto_reject_candidates: int,
+) -> LookupWriteResult:
+    """Insert one looked-up record into an existing run: joins
+    `merge_cluster_id` if given (bumping that cluster's `size`), else starts
+    a new singleton cluster; writes one `review_queue` row per
+    `review_targets` entry against the record's final cluster -- `cluster/
+    base.py`'s own invariant, "every pair a partition leaves apart falls
+    back to its band," applied to a partition of size one, not an ad hoc
+    rule; updates `runs`' live counts (`n_records` always, `n_clusters` iff
+    a new singleton was created, the three band counts by
+    `n_*_candidates` -- the same candidate-level accounting `write_run`
+    already does via `assign_bands`, just for this one lookup's candidates
+    rather than a whole batch). One transaction, mirroring `write_run`'s
+    BEGIN/COMMIT/ROLLBACK shape.
+
+    Raises `ValueError` if `record_id` already exists in this run --
+    `write_run` never needed this check, since a batch run always starts
+    from an empty table; a lookup extends one that might already hold it.
+    """
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM records WHERE run_id = ? AND record_id = ?", [run_id, record_id]
+        ).fetchone()
+        if exists is not None:
+            raise ValueError(f"record {record_id!r} already exists in run {run_id!r}")
+
+        position = conn.execute(
+            "SELECT COALESCE(max(position), -1) + 1 FROM records WHERE run_id = ?", [run_id]
+        ).fetchone()[0]
+
+        if merge_cluster_id is not None:
+            cluster_id = merge_cluster_id
+            conn.execute(
+                "UPDATE clusters SET size = size + 1 WHERE cluster_id = ?", [cluster_id]
+            )
+            new_cluster = False
+        else:
+            next_label = conn.execute(
+                "SELECT COALESCE(max(label), -1) + 1 FROM clusters WHERE run_id = ?", [run_id]
+            ).fetchone()[0]
+            cluster_id = f"{run_id}:{next_label}"
+            conn.execute(
+                "INSERT INTO clusters VALUES (?, ?, ?, ?)",
+                [cluster_id, run_id, next_label, 1],
+            )
+            new_cluster = True
+
+        raw = record.raw
+        conn.execute(
+            "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                run_id,
+                record_id,
+                position,
+                cluster_id,
+                raw.source,
+                raw.title,
+                raw.brand,
+                raw.category,
+                raw.price,
+                raw.model_dump_json(),
+            ],
+        )
+
+        now = datetime.now(UTC)
+        review_rows = [
+            ReviewQueueRow(
+                review_id=uuid.uuid4().hex,
+                run_id=run_id,
+                left_record_id=target.record_id,
+                right_record_id=record_id,
+                probability=target.probability,
+                band="review",
+                left_cluster_id=target.cluster_id,
+                right_cluster_id=cluster_id,
+                created_at=now,
+                is_match=None,
+                reviewer_id=None,
+                decided_at=None,
+            )
+            for target in review_targets
+        ]
+        if review_rows:
+            conn.executemany(
+                "INSERT INTO review_queue VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r.review_id,
+                        r.run_id,
+                        r.left_record_id,
+                        r.right_record_id,
+                        r.probability,
+                        r.band,
+                        r.left_cluster_id,
+                        r.right_cluster_id,
+                        r.created_at,
+                        r.is_match,
+                        r.reviewer_id,
+                        r.decided_at,
+                    )
+                    for r in review_rows
+                ],
+            )
+
+        conn.execute(
+            "UPDATE runs SET "
+            "n_records = n_records + 1, "
+            "n_clusters = n_clusters + ?, "
+            "n_auto_merge = n_auto_merge + ?, "
+            "n_review = n_review + ?, "
+            "n_auto_reject = n_auto_reject + ? "
+            "WHERE run_id = ?",
+            [
+                1 if new_cluster else 0,
+                n_auto_merge_candidates,
+                n_review_candidates,
+                n_auto_reject_candidates,
+                run_id,
+            ],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    return LookupWriteResult(
+        record=RecordRow(
+            run_id=run_id,
+            record_id=record_id,
+            position=position,
+            cluster_id=cluster_id,
+            source=raw.source,
+            title=raw.title,
+            brand=raw.brand,
+            category=raw.category,
+            price=raw.price,
+            raw_json=raw.model_dump_json(),
+        ),
+        review_rows=review_rows,
     )

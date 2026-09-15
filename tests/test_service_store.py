@@ -163,3 +163,134 @@ def test_the_same_pair_cannot_be_queued_twice_for_one_run(tmp_path):
             "('dup', ?, 'r1', 'r3', 0.6, 'review', ?, ?, now(), NULL, NULL, NULL)",
             [run_id, f"{run_id}:0", f"{run_id}:1"],
         )
+
+
+def test_get_records_by_ids_batch_fetches(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+
+    rows = store.get_records_by_ids(conn, run_id, ["r1", "r3"])
+    assert {r.record_id for r in rows} == {"r1", "r3"}
+    assert store.get_records_by_ids(conn, run_id, []) == []
+
+
+# ---------------------------------------------------------------------------
+# Online lookup: run_indexes, apply_lookup
+# ---------------------------------------------------------------------------
+
+
+def test_run_indexes_round_trip(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+
+    assert store.get_run_indexes(conn, run_id) is None
+
+    store.set_run_indexes(conn, run_id, ann_root="idx/ann", standard_root="idx/standard")
+    row = store.get_run_indexes(conn, run_id)
+    assert (row.ann_root, row.standard_root) == ("idx/ann", "idx/standard")
+
+
+def test_set_run_indexes_is_an_upsert(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+
+    store.set_run_indexes(conn, run_id, ann_root="idx/ann", standard_root="idx/standard")
+    store.set_run_indexes(conn, run_id, ann_root="idx/ann2", standard_root="idx/standard2")
+
+    row = store.get_run_indexes(conn, run_id)
+    assert (row.ann_root, row.standard_root) == ("idx/ann2", "idx/standard2")
+
+
+def test_apply_lookup_merges_into_an_existing_cluster(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+    r1 = store.get_record(conn, run_id, "r1")
+    before = store.get_run(conn, run_id)
+
+    new_record = rec("r4", "widget deluxe xy123z v3")
+    written = store.apply_lookup(
+        conn,
+        run_id,
+        record=new_record,
+        record_id="r4",
+        merge_cluster_id=r1.cluster_id,
+        review_targets=[],
+        n_auto_merge_candidates=1,
+        n_review_candidates=0,
+        n_auto_reject_candidates=0,
+    )
+    assert written.record.cluster_id == r1.cluster_id
+    assert written.review_rows == []
+
+    after = store.get_run(conn, run_id)
+    assert after.n_records == before.n_records + 1
+    assert after.n_clusters == before.n_clusters  # merged, no new cluster
+    assert after.n_auto_merge == before.n_auto_merge + 1
+
+    merged_cluster = store.get_cluster(conn, run_id, r1.cluster_id)
+    assert merged_cluster.size == 3  # r1, r2, and now r4
+
+    records, total = store.list_records(conn, run_id, cluster_id=r1.cluster_id)
+    assert total == 3
+    assert {r.record_id for r in records} == {"r1", "r2", "r4"}
+
+
+def test_apply_lookup_starts_a_new_singleton_and_queues_reviews(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+    r1 = store.get_record(conn, run_id, "r1")
+    r3 = store.get_record(conn, run_id, "r3")
+    before = store.get_run(conn, run_id)
+
+    new_record = rec("r4", "ambiguous item")
+    written = store.apply_lookup(
+        conn,
+        run_id,
+        record=new_record,
+        record_id="r4",
+        merge_cluster_id=None,
+        review_targets=[
+            store.ReviewTarget(cluster_id=r1.cluster_id, record_id="r1", probability=0.7),
+            store.ReviewTarget(cluster_id=r3.cluster_id, record_id="r3", probability=0.6),
+        ],
+        n_auto_merge_candidates=0,
+        n_review_candidates=2,
+        n_auto_reject_candidates=0,
+    )
+    assert written.record.cluster_id not in (r1.cluster_id, r3.cluster_id)
+    assert len(written.review_rows) == 2
+    assert {r.left_cluster_id for r in written.review_rows} == {r1.cluster_id, r3.cluster_id}
+
+    after = store.get_run(conn, run_id)
+    assert after.n_records == before.n_records + 1
+    assert after.n_clusters == before.n_clusters + 1
+    assert after.n_review == before.n_review + 2
+
+    new_cluster = store.get_cluster(conn, run_id, written.record.cluster_id)
+    assert new_cluster.size == 1
+
+    queue, _ = store.list_review_queue(conn, run_id, decided=False)
+    against_r4 = [q for q in queue if "r4" in (q.left_record_id, q.right_record_id)]
+    assert len(against_r4) == 2
+    assert {q.left_cluster_id for q in against_r4} == {r1.cluster_id, r3.cluster_id}
+
+
+def test_apply_lookup_refuses_a_duplicate_record_id(tmp_path):
+    conn = store.connect(tmp_path / "x.duckdb")
+    run_id = write_small_run(conn)
+
+    with pytest.raises(ValueError, match="already exists"):
+        store.apply_lookup(
+            conn,
+            run_id,
+            record=rec("r1", "widget deluxe xy123z"),
+            record_id="r1",
+            merge_cluster_id=None,
+            review_targets=[],
+            n_auto_merge_candidates=0,
+            n_review_candidates=0,
+            n_auto_reject_candidates=0,
+        )
+    # And the refused write left no trace -- still 3 records, run counts unmoved.
+    _, total = store.list_records(conn, run_id)
+    assert total == 3
