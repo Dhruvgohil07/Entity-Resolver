@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Nine stages implemented (`pytest` → 576 passing, 1 skipped; 94% line coverage). Two things
-are **not** covered by that run, and both are called out where they belong rather than folded into
-the count: the `semantic.py` carve-out inside the `features/` bullet, and the five report CLI
-entry points under the list.
+Ten stages implemented (`pytest` → 665 passing, 1 skipped; coverage not re-measured this sync).
+Two things are **not** covered by that run, and both are called out where they belong rather than
+folded into the count: the `semantic.py` carve-out inside the `features/` bullet, and the five
+report CLI entry points under the list.
 
 - **`schema.py`** — canonical `Record` model (product-domain scope; `raw_attributes` is the escape
   hatch for unmapped source columns). Committed.
@@ -27,10 +27,14 @@ entry points under the list.
   imports `notes.py` or `abt_buy_notes.py` by name; both are reached, at 100% line coverage,
   through the `dedup.data` registry that test and the renderer tests import. `synthetic.py`
   writes `records.jsonl` plus `manifest.json` — JSONL because CSV collapses `None` into `""` — and
-  its loader refuses a hash mismatch, a non-synthetic source, a record without `split_group`, and
-  any catalog whose manifest records a seed split other than the train side of the report split.
-  That last check reads what the generator recorded, not the seed records themselves, and nothing
-  checks which dataset seeded a catalog; the second audit found both gaps, and neither is fixed.
+  its loader refuses a hash mismatch, a non-synthetic source, a record without `split_group`, a
+  manifest naming a `seed_dataset` other than what the registry expects (checked cheaply, against
+  the manifest's own claim, on every load), and any catalog whose manifest records a seed split
+  other than the train side of the report split. That last check still only compares recorded
+  numbers, not the seed records themselves — `synth.generate.verify_seed_provenance` closes that
+  gap instead, deliberately outside `load_synthetic`, by reloading the seed dataset and re-deriving
+  the split fresh; it runs inside `generate.py`'s `main()` and, independently, against the committed
+  `synth-20k` catalog in `tests/test_data_synthetic.py`. Both gaps the second audit found are fixed.
 - **`eval/`** — `metrics.py` (PR curve, PR-AUC, precision@k, threshold evaluation — all taking
   `n_positives_total` so a pruned candidate set cannot flatter recall), `splits.py` (entity-grouped
   train/test splitting — grouped on `Record.split_group` where records carry one, so a synthetic
@@ -38,17 +42,27 @@ entry points under the list.
   `count_true_pairs`, and `DEFAULT_TEST_FRACTION` / `DEFAULT_SEED`, the report split), and
   `baseline.py` (the TF-IDF baseline; see **Baseline to beat**). Result committed at
   `reports/baseline_tfidf.md`.
-- **`blocking/`** — nine modules, all exercised by tests: four blocker families (`standard` exact
+- **`blocking/`** — ten modules, all exercised by tests: four blocker families (`standard` exact
   keys, `sorted_neighborhood`, `lsh`, `ann`) plus `union.py` (which combines them and computes pair
   completeness / reduction ratio), `pairs.py` (the packed-int64 representation), `base.py` (the
-  `Blocker` contract), `defaults.py` (the shared blocker set and `block_split`, the runner every
-  later stage uses) and `evaluate.py` (the CLI). No test imports `defaults.py` by name; it is
-  reached, at 100% line coverage, through the names `blocking/evaluate.py` and
-  `features/evaluate.py` re-export and through `model/train.prepare`. Union pair completeness
+  `Blocker` contract), `defaults.py` (the shared blocker set, `block_split` the runner every
+  evaluation stage uses, and `block_unlabeled` its labels-free twin for a real batch catalog --
+  `block_split`'s `ground_truth` call raises on a record with no `entity_id`, which is what every
+  record `service/batch.py` scores has), `evaluate.py` (the CLI), and `standard_index.py` (the
+  tenth, added with `service/` v2 -- `InvertedIndex`, the incrementally-queryable online-lookup
+  twin of `standard.py`'s `model_number_keys`/`code_token_keys`, detailed in the `service/` v2
+  bullet below). `tests/test_blocking_defaults.py`
+  imports `defaults.py` by name, pinning its literal defaults against every committed report and
+  `block_unlabeled` against `block_split`'s candidate set; `evaluate.py`, `model/train.prepare` and
+  `service/batch.py` reach it too. Union pair completeness
   **0.9928** at reduction ratio 0.9644 on Abt-Buy — the recall ceiling every later stage inherits.
-  Result committed at `reports/blocking.md`. `default_blocker_set(ann_components=...)` projects
-  `ann` with SVD for a catalog past its dense memory budget, and the CLI's `--without` leaves a
-  blocker out and names it in the report; `None` and no omission are the committed set.
+  Result committed at `reports/blocking.md`. `default_blocker_set(ann_components=..., ann_neighbours=...,
+  lsh_max_neighbours=...)` projects `ann` with SVD for a catalog past its dense memory budget,
+  raises `ann`'s HNSW neighbour count `k` for a catalog whose sibling families crowd out the
+  default, and caps `lsh`'s per-record candidate count for a catalog whose unbounded LSH output
+  outgrows a single array allocation; the CLI's `--without` leaves a blocker out and names it in
+  the report. `None`/`ANN_DEFAULT_NEIGHBOURS`/`None` (no projection, k=10, unbounded) and no
+  omission are the committed set every report at Abt-Buy and `synth-20k` scale was measured with.
 - **`features/`** — seven modules: `base.py` (the `FeatureSpec` / `FeatureMatrix` contract),
   `string.py`, `numeric.py`, `semantic.py` and `missingness.py` (the blocks), `vectorize.py`
   (`PairFeaturizer`, fit/transform), and `evaluate.py` (the CLI). **33 columns** (34 with the
@@ -75,7 +89,11 @@ entry points under the list.
   can never reorder pairs. Every interpretive sentence in the report is chosen from the measured
   value rather than printed unconditionally, and a synthetic report exercises the branches
   Abt-Buy never reaches — a claim true on one dataset and asserted regardless is false on the
-  next.
+  next. `PairScorer` gained `.save`/`.load`/`read_scorer_manifest`: pickle plus a hash-and-manifest
+  pattern mirroring `data/synthetic.py`'s (refuse a missing manifest, a hash mismatch, or a
+  feature-name mismatch against a differently-shaped featurizer), and `model/evaluate.py` gained
+  `--save-scorer` so the CLI that already fits a calibrated scorer is the only place that persists
+  one — `service/batch.py` only ever loads.
 - **`cluster/`** — six modules: `base.py` (`ScoredGraph`, and `expected_partition_cost` — the
   bands' cost model applied to every pair a partition decides: merged pairs at `(1-p)·C_fm`,
   pairs left apart falling back to review or rejection, pairs blocking never emitted at p = 0),
@@ -116,12 +134,48 @@ entry points under the list.
   generator's `main()` is the one CLI with a test that calls it. An `er-invariants` audit found no
   violations and two findings worth closing, both closed: the seed split is no longer a flag, and
   a baseline scored above a similarity floor is quoted with what the floor cost. A second audit,
-  after those fixes, also found no violations, and four findings that are **not yet fixed**:
-  `reports/synth/blocking-200k.md` still calls its `--without lsh` union the ceiling later stages
-  inherit; the loader's seed check trusts the manifest (see `data/` above); the synthetic baseline
-  report says a single global threshold does not transfer, against its own 0.003 gap to the
-  oracle; and several figures under Open questions come from one-off measurements with no
-  committed report behind them, each marked where it appears.
+  after those fixes, found no violations and four findings; one is now fixed:
+  `reports/synth/blocking-200k.md`'s "What this means" section called its `--without lsh` union
+  "a hard ceiling on system recall" unconditionally, contradicting its own "Reading this honestly"
+  bullet ("the union row is the ceiling of the blockers in the table, not of the default set");
+  `blocking/evaluate.py`'s renderer now states the union figure as a **lower bound** on the default
+  set's ceiling whenever `--without` left a blocker out, matching the honest-reading bullet, pinned
+  by `test_a_run_with_an_omission_calls_its_union_a_lower_bound_not_a_ceiling`; the report
+  regenerated byte-for-byte apart from its wall-clock columns. A second is now fixed: the loader's
+  seed-split check only ever compared the manifest's recorded `(test_fraction, seed)` against what
+  a report expects, never against the seed dataset's real records, so a `split_by_entity` change
+  could move an entity from train to test without changing either number -- and nothing tied a
+  registry entry to the benchmark it claims to be seeded from at all. Two additions close both,
+  deliberately outside the hot load path (`load_synthetic` stays free of a hard dependency on the
+  seed dataset being present, by design -- see `data/` above): `synth.generate.verify_seed_provenance`
+  reloads the seed dataset and re-derives the split with the *current* code, then checks every
+  embedded `seed_entity_id` against the real train side, not the manifest's claim; it runs (mostly
+  as a no-op safety net, since `generate()` cannot currently emit an id from outside `train`) inside
+  `generate.py`'s `main()`, and for real against the *committed* catalogs, independently reloaded,
+  in `test_the_committed_synth_20k_catalog_really_is_seeded_from_train` -- confirmed against
+  `synth-200k` too, by hand, not by a committed test (165k records makes it a minutes-long check).
+  Separately, `data/__init__.py`'s registry now binds `synth-20k` / `synth-200k` to
+  `seed_dataset="abt-buy"` via `functools.partial`, and `load_synthetic` refuses a manifest
+  claiming any other seed dataset when that expectation is passed. A third is now fixed:
+  `eval/baseline.py`'s `_threshold_transfer_bullet` printed "a single global threshold still does
+  not transfer across catalog sizes" on `synth-20k` unconditionally, against its own 0.0030 F1 gap
+  to the test oracle -- the same near-zero gap Abt-Buy already carried (0.0045), which the
+  Abt-Buy branch's wording partly obscured with an unmeasured claim about a 200k-record report
+  that does not exist. Both branches now compute the oracle gap and state plainly whether it
+  transferred well against `GAP_TRANSFERS_WELL = 0.01` (documented as a rounding-sized cutoff, not
+  a tuned one), pinned by `test_a_small_oracle_gap_is_not_called_a_transfer_failure`; both
+  `reports/baseline_tfidf.md` and `reports/synth/baseline_tfidf.md` regenerated byte-for-byte apart
+  from that one bullet. The fourth is now closed by re-verification rather than by committing new
+  reports: every one-off figure under Open questions that CLAUDE.md flagged as uncommitted (the
+  `synth-20k` blocking leave-one-out table, the character-shingle LSH comparison, the `ann` SVD-128
+  `k=10`/`k=50` sweep, the isotonic-vs-Platt calibration comparison, the mid-band count and the cost
+  sensitivity grid) was independently re-derived on 2026-09-14 against current code. All but one
+  reproduced exactly; the one exception (Platt's distinct-output count) was wrong in this file and
+  is corrected above, not left stale. They remain deliberately uncommitted — each is a one-off
+  ablation at fixed settings rather than something every report run recomputes, which is the same
+  reasoning `default_blocker_set`'s own docstring gives for keeping a zero-marginal blocker rather
+  than deleting it. Promoting any of them to a committed `reports/` artifact is still open, as a
+  separate decision from whether they are currently trustworthy -- they now are.
 
 Implemented but **untested**: the five CLI entry points — `main()` in `eval/baseline.py`,
 `blocking/evaluate.py`, `features/evaluate.py`, `model/evaluate.py` and `cluster/evaluate.py`.
@@ -141,25 +195,131 @@ and a directory absent because `data/` is gitignored), plus a check that walks t
 asserting no module outside `data/` imports a loader. That last one guards the rule rather than the
 plumbing, and a stage added later inherits it by existing.
 
-`service/` is the one remaining bare directory: an `__init__.py` whose entire content is a
-docstring, and no modules.
+`service/` v1 is implemented: batch dedup + a review queue, both tested, both run against real
+Abt-Buy data for this sync. Five modules -- `store.py` (DuckDB schema: `runs`/`clusters`/`records`/
+`review_queue`, connection and typed read/write helpers, no pydantic or FastAPI), `batch.py`
+(`run_batch` -- blocking via the new `blocking.defaults.block_unlabeled` (below), scoring, average
+linkage -- plus its CLI, the only writer of every table), `schemas.py` (API pydantic models),
+`review.py` (`record_decision`, the not-found/already-decided rule, testable with no `TestClient`)
+and `app.py` (the FastAPI app; batch execution stays CLI-only by design -- blocking through
+clustering can take minutes at scale, and background-job infrastructure is out of scope).
+`PairScorer` gained `.save`/`.load`/`read_scorer_manifest` (`model/train.py`, pickle plus a
+hash-and-manifest pattern mirroring `data/synthetic.py`'s) and `model/evaluate.py` gained
+`--save-scorer` so the CLI that fits a calibrated scorer is the only place that persists one.
+`block_split()`'s ground-truth call (`eval.splits.group_by_entity`) raises on a record with no
+`entity_id` -- correct for evaluation, wrong for a real batch catalog where nobody knows the
+answer yet -- so `block_unlabeled()` is `service/batch.py`'s entry point instead, sharing
+`default_blocker_set()` rather than a second, driftable blocker list.
 
-First, the second audit's four open findings above: each is small, all four are in uncommitted
-work, and two of them are claims this file and a report currently make wrongly. Then
-**blocking at scale**, not `service/`. `synth/` brought measured evidence to all four decisions
-it was built for — some settled, some reopened (see Open questions) — and its sharpest finding is
-that blocking is where the pipeline breaks. The default set reaches pair completeness 0.9238 on
-`synth-20k`; on `synth-200k` it cannot run at all, because token LSH exhausts memory, and the
-blockers that can — with `ann` behind SVD-128, where it falls to 0.0597 — reach **0.6712**. That
-is a lower bound on the default set's ceiling rather than the ceiling, since the omitted blocker
-could only add pairs. `service/` answers online lookups through that same index over a large
-catalog, and it serves entities `cluster/` builds from blocking's candidates, so it cannot be
-evaluated at scale before blocking has candidates flowing at scale. The measured lever is `ann`'s
-neighbour count alongside the projection (the settled `ann` entry), plus a memory bound on LSH's
-candidate generation. Two passes are independent of
-that: an `error-analyst` pass over `model/` and `features/` — the fusions surviving clustering on
-both datasets, and `synth-20k`'s P@10 of 0.000 — and a persisted `PairScorer`, which `service/`
-needs regardless.
+`service/` v2 closes the other half: **online lookup**, "given one new record" answered against a
+persisted, incrementally-queryable index kept warm between requests, rather than rebuilding from
+scratch per call. Two blockers grew a build/query split for this alone -- `blocking/ann.py`'s
+`AnnIndex` (`build`/`query_one`/`add`/`save`/`load`, sharing `AnnBlocker`'s fit/transform logic
+through two extracted helpers so batch and online paths can never define "the vector for a record"
+two different ways) and the new `blocking/standard_index.py`'s `InvertedIndex`, covering
+`model_number_keys` and `code_token_keys` only -- `rare_token_keys` needs corpus-wide document
+frequency that every insert would invalidate, so it is excluded, not silently degraded. Both
+persist directory + `manifest.json` + `artifact_sha256`, refusing a hash mismatch, exactly like
+`PairScorer.save`/`.load`. The decision logic (`service/lookup.py`, pure, no I/O) scores a new
+record against every candidate with the existing `PairScorer`, groups by the candidate's *current*
+`cluster_id`, and prices a merge the way `cluster/base.merge_credit` prices merging two clusters,
+not by one best edge: an earlier version merged into a cluster whenever its single highest-scoring
+member cleared `p_hi`, which reintroduces at serve time exactly the chaining `cluster/base.py`'s
+own docstring names as the difference between a clusterer and the pairwise bands -- caught by an
+`er-invariants` audit before commit, not theoretical (a record scoring 0.99 against one member and
+0.20 against another of the same 2-member cluster auto-merged into the whole thing, something
+`average_linkage` itself would refuse). Fixed to sum `merge_credit(p)` over every candidate edge
+into a cluster and compare against `C_fm * cluster_size` -- that cluster's *total* membership, not
+just how many of its members blocking surfaced as candidates, so an unscored member earns no
+credit and correctly makes a large, mostly-unmatched cluster harder to join, per `cluster/base.py`'s
+own "a pair with no edge earns no credit" rule. A cluster whose best edge clears `p_hi` but whose
+aggregate does not still gets a review row rather than being silently dropped or wrongly merged.
+No cluster's aggregate clears the merge bar and none reach `p_lo` -> new singleton; some land in
+`[p_lo, p_hi)` on their best edge, or clear `p_hi` on their best edge without clearing the aggregate
+-> new singleton plus one review row per such cluster (its best-scoring member is the row's
+representative pair); one or more clusters' aggregate clears the bar -> merge into the
+highest-aggregate one (ties broken on the smaller `cluster_id`, matching `agglomerative.py`'s
+convention), every other qualifying cluster queued for review against it -- never both merged,
+never both only queued, pinned by
+`test_scoring_above_p_hi_against_two_different_singleton_clusters_merges_exactly_one` and, for the
+chaining fix specifically,
+`test_a_strong_edge_against_one_member_does_not_merge_a_whole_weakly_matched_cluster` and
+`test_an_unscored_cluster_member_earns_no_credit_and_can_block_a_merge`. A new `run_indexes`
+table (not new columns on `runs` -- `CREATE TABLE IF NOT EXISTS` cannot retroactively migrate an
+existing table) tracks whether a run has opted in; `python -m dedup.service.build_index` is the
+explicit CLI that builds both indexes over a run's current catalog and flips that on, mirroring why
+batch execution stayed CLI-only in v1 (refitting `ann`'s vectorizer is the same unbounded,
+request-shaped-wrong operation). `POST /runs/{run_id}/lookup` writes through a new
+`store.apply_lookup()` (one transaction, mirroring `write_run`'s `BEGIN`/`COMMIT`/`ROLLBACK`), then
+always re-saves both indexes with the new record added -- a crash between requests must not
+silently reopen a recall gap on restart. A real concurrency hazard, checked not assumed: every route
+is `def`, not `async def`, so FastAPI/Starlette runs them in a thread-pool, and a single DuckDB
+connection plus an in-memory mutating FAISS index are both unsafe under genuine parallel requests --
+fixed with a per-`run_id` `threading.Lock` in `app.state`, applied to this route and, in fairness,
+the existing review-decision route too. Verified end-to-end against a real trained scorer and a real
+batch run (`tests/test_service_app_lookup.py`): auto-merge, new-cluster, the multi-candidate
+different-clusters case, and (via a stub scorer standing in for a real score this small catalog's
+bimodal distribution never produces naturally) the review-only case, plus both 409s and the 404.
+Three costs are stated, not hidden -- see Open questions: the vectorizer's vocabulary is frozen at
+`build()` and never refit, so a lookup whose distinguishing vocabulary is new to the corpus gets no
+signal from it; `lsh`, `sorted_neighborhood` and `rare_token_keys` are not online-queryable, an
+unmeasured recall gap against the batch path's PC 0.9928; and this never asks whether two *existing*
+clusters should merge, only which one cluster the new record joins.
+
+One correctness point worth recording because a smoke run against real Abt-Buy data confirmed it
+rather than just asserting it: the review queue is populated from `cluster.base.review_mask`, not
+`model.threshold.assign_bands(...).review` -- on that run the two counts genuinely differ (43
+candidate-level review-band pairs against 87 queued), because a clustering partition can merge a
+pair the bands would have queued or leave apart one they would have auto-merged
+(`cluster/base.py`'s own documented fact). Using `assign_bands` for the queue would have produced
+one inconsistent with the clusters the same run returns.
+
+Not yet built: the htmx review UI (CLAUDE.md's stack choices still name it; both v1 and v2 are JSON
+API only, by agreed scope), and reconciling entity identity across repeated runs or across the
+clusters *within* one run (`cluster_id` is `f"{run_id}:{label}"`, stable within one run, not a
+persistent identity -- online lookup answers which one cluster a new record joins, never whether
+two existing clusters should merge).
+
+All four of the second audit's findings are now closed: the `blocking-200k.md`
+ceiling-vs-lower-bound claim, the seed-provenance / seed-dataset gaps in `synth/generate.py` and
+`data/synthetic.py`, the synthetic baseline's unmeasured "does not transfer" claim, and the
+uncommitted one-off figures (re-verified rather than promoted to a committed report, with one
+genuine error corrected -- see above). **Blocking at scale is now closed too.** `synth/` brought
+measured evidence to all four decisions it was built for — some settled, some reopened (see Open
+questions) — and its sharpest finding was that blocking is where the pipeline breaks: the default
+set reaches pair completeness 0.9238 on `synth-20k`, but on `synth-200k` it could not run at all,
+because unbounded token LSH accumulated more raw candidate pairs than a single array allocation
+could hold. The two measured levers CLAUDE.md named — `ann`'s neighbour count alongside the
+projection, and a memory bound on LSH's candidate generation — both work: raising `ann`'s `k` to
+150 (behind the same SVD-128 projection) and capping `lsh` at 500 candidates per record lets every
+default blocker run on `synth-200k` for the first time, no `--without`, no OOM, reaching union pair
+completeness **0.8469** — a real ceiling, not a lower bound (`reports/synth/blocking-200k.md`).
+Neither sweep is exhausted: both `k` and the LSH cap were still raising PC at the last value
+tested (k=10→50→100→150: PC 0.0597→0.2225→0.3805→0.5000; LSH cap=100→300→500: PC
+0.0871→0.3201→0.4042), so 0.8469 is what two swept-not-tuned parameters reach at a practical time
+budget on this catalog, not a plateau — pushing either further is available, measured work, not a
+blocker. `default_blocker_set`'s literal defaults are unchanged (`k=10`, unbounded LSH — what
+every Abt-Buy/`synth-20k` report was measured with); both new parameters apply only via the
+explicit CLI flags on `synth-200k`'s own committed command.
+
+`service/` now answers both of CLAUDE.md's opening questions — batch dedup and online lookup (see
+the two `service/` bullets above) — and an `error-analyst` pass ran over `model/` and `features/`,
+covering both threads Project status previously named as next. The pass's findings are recorded
+below (Open questions) and are why the near-duplicate-P@10-on-synth-20k entry now states a cause
+instead of a hypothesis. It also surfaced one actionable, unapplied defect in `normalize.py` and two
+`features/`-shaped gaps the booster structurally can't close on its own — none yet fixed, each
+recorded rather than acted on unilaterally, since a fix to extraction touches every downstream
+report. Separately, an `er-invariants` audit of `service/` v2 before commit caught and closed one
+real defect (the online-lookup chaining bug — see the `service/` v2 bullet above) and named two
+more it left for `/code-review` rather than treating as invariant violations: `app.py`'s GET routes
+read the shared DuckDB connection without the per-`run_id` lock a concurrent lookup's write holds,
+and `apply_lookup`'s index saves happen *after* its DB transaction commits, so a crash in that
+window leaves a persisted index missing a record the store already reports as written. Neither is
+fixed. No stage is blocked on data from an earlier one any more — all ten are exercised end to end
+against real Abt-Buy data, `service/` included — so what's next is a real decision among
+independent options, not a default: apply the `normalize.py` fix and re-verify the reports it
+touches, close the two named `service/` gaps, build the htmx review UI now that both API halves
+exist, or something else entirely.
 
 `model/` answered the comparison the project is built around: **test F1 0.8934** against the
 baseline's 0.5204, at a threshold chosen on train and spent on test. Read `reports/model.md` before
@@ -216,7 +376,10 @@ settled against more data rather than treated as decided:
   (1 - 0.91)·20 = 1.8, so any closing edge above 0.90 merges. Billed as one merge decision it
   would cost one review and be queued. Neither cost-based row merges such a pair on the Abt-Buy
   test split, and no test pins the case. Settle it with `service/`'s review queue: measured time
-  per merge decision against cluster size.
+  per merge decision against cluster size. That measurement is now instrumentable, not answered:
+  `service/store.py`'s `review_queue` table carries `left_cluster_id`/`right_cluster_id` and
+  `created_at`/`decided_at` on every row, so "time per decision against the pair's cluster sizes"
+  is a query away once real review decisions accumulate -- nobody has made one yet.
 - **`synth/`'s entity sizes and structure are judgment calls, not measurements.** Sizes run 40%
   singletons, 30% pairs, 15% triples and 15% from four to eight records, because Abt-Buy has only
   pairs and triples and the p = 0 question below needs larger entities; nothing grounds the
@@ -226,13 +389,50 @@ settled against more data rather than treated as decided:
   sibling derives from one seed, so the sibling *rate* matches (0.512 against 0.557) while their
   *shape* does not. Revisit against a second real catalog before trusting a synthetic number that
   leans on either.
-- **The model may have learned a synthetic artifact.** On `synth-20k`, P@10 is 0.000 — its ten most
-  confident pairs are all wrong — and auto-merge precision *falls* from 0.9538 at `p_hi` 0.95 to
-  0.8388 at 0.98. One surviving fusion has the suspected shape: `4574K550 Canon Battery Charger`
-  against `4581V016 Polk Audio ... Loudspeaker`, two brands scored 0.98, both leading with an
-  alternate-scheme part number, which the generator draws from a single `####L###` shape. A
-  hypothesis from one example, not a finding. Settle it with an `error-analyst` pass over the
-  top-scored false pairs before quoting any top-of-ranking synthetic number.
+- **Online lookup's recall against a real catalog is unmeasured.** `service/`'s lookup path only
+  ever queries `ann` and `standard`'s `model_number`/`code_token` keys -- `lsh`,
+  `sorted_neighborhood` and `standard`'s `rare_token_keys` are excluded because none of the three
+  can be incrementally maintained without a full rebuild (LSH's bands, the sorted array, and rare
+  tokens' corpus-wide document frequency all change on every insert). What that costs recall against
+  the batch path's union PC 0.9928 has never been measured -- it could be small (per the
+  leave-one-out table below, `rare_token_keys` alone was worth +0.0089 on Abt-Buy) or could be the
+  dominant gap once `sorted_neighborhood`'s +0.0045 and Abt-Buy-specific effects are counted.
+  Settle it by running real lookups over a held-out split and comparing against the batch union's PC
+  on the same split, not by reasoning from the batch table alone -- online queries see one record's
+  neighbourhood at a time, not the whole catalog's.
+- **The `ann` vectorizer's vocabulary freezes at `build_index` time and never refits.** A lookup
+  whose distinguishing tokens are genuinely new to the corpus (a brand or model-number pattern never
+  seen when the run was indexed) gets no signal from that vocabulary, silently degrading to
+  `standard`'s two key functions alone for that record. Re-running `build_index` periodically is the
+  only mitigation shipped, and how much drift accumulates between re-runs, on a real catalog taking
+  real lookups, is not measured.
+- **Online lookup never asks whether two existing clusters should merge.** The decision logic
+  (`service/lookup.py`) picks which one cluster a new record joins; it structurally cannot notice
+  that clusters A and B have now accumulated several strong review-links against each other, which
+  `cluster/agglomerative.py`'s objective would eventually resolve on a full batch re-run. No
+  mechanism surfaces that signal or triggers a re-run -- an operational gap, not an algorithmic one.
+- **The near-perfect top of the synthetic ranking is a scale effect, not a synthetic artifact --
+  settled by an `error-analyst` pass, not fixed.** The earlier hypothesis (a shared `####L###`
+  part-number shape fooling the model) does not hold: it appears in only 1 of the 43 highest-scored
+  false pairs on `synth-20k`'s test split, against a 1.4% base rate -- no enrichment. What is true:
+  ranks 1-44 are all wrong and the first true pair is at rank 45, while `raw >= 0.99` is 92% precise
+  immediately below that. The 43 score *below* the all-candidate mean on every similarity column
+  (`model_number_exact` 0.0000 against 0.0207, `title_tfidf_cosine` 0.0833 against 0.2167) --
+  they are not confidently wrong because a feature misfires, they are unusually dissimilar. The
+  cause: the generator's alternate-part-number corruption manufactures genuine zero-evidence
+  duplicates (62% of the 95 zero-evidence true pairs in test carry that shape on one side, against a
+  12% base rate -- the generator is well calibrated here), the booster learns a real high-score
+  region for them, and that region also catches unrelated pairs. The zero-evidence-positive *rate*
+  in train is nearly identical to Abt-Buy's (1.68% of positives against 1.81%) -- only the absolute
+  count differs, 233 against 14, straddling `model/train.py`'s `min_child_samples=20`: a leaf
+  isolating the pattern forms easily on `synth-20k`'s scale and cannot form on Abt-Buy's, which is
+  why Abt-Buy shows no such inversion (P@100 1.0000). That implies the same failure mode should
+  appear on a real catalog this size, the opposite conclusion from "the model learned a synthetic
+  artifact." Not yet applied: `monotone_constraints` on the code and title-similarity columns in
+  `model/train.py:DEFAULT_PARAMS` is the named fix, trading against an unmeasured PR-AUC cost, and
+  `synth/`'s corruption rates stay as they are -- capping the alternate-part-number operator would
+  suppress a symptom by making the catalog *less* like a real one on the one axis `realism.md`
+  currently matches.
 
 Settled by measurement, recorded so it is not re-litigated:
 
@@ -248,6 +448,22 @@ Settled by measurement, recorded so it is not re-litigated:
   model-number path passes a code taken from the raw title, blocking passes tokens from the folded
   one, and without that a precomposed `Ü` is dropped whole while a decomposed one keeps its base
   letter, keying the same code two ways.
+- **The fix above has a hole: extraction's own shape gate disagrees with `code_key` about what a
+  code is.** `_qualifies_as_model_number` tests the raw candidate token against
+  `^[A-Za-z0-9-]+$`, which rejects `/` -- so on `'Samsung YP-S2ZW 1GB Flash MP3 Player -
+  YP-S2ZG/XAA'` the trailing, correct code fails the gate and extraction falls through to the
+  leading token, which is a *different* listing's code entirely. Confirmed directly, not inferred:
+  `_extract_model_number` returns `'YP-S2ZW'` for that record. Consequence, measured on the Abt-Buy
+  test split: this single disagreement produces the pipeline's only fusion surviving *both*
+  cost-based clusterers (`reports/cluster.md`'s chaining example) at p=0.9940 on a Green/White pair,
+  and a false negative on that same record's true partner at p=0.0074 -- the false pair outranks the
+  true one, so no clustering objective over these probabilities can separate them; only fixing
+  extraction can. Found by an `error-analyst` pass, not yet applied: the fix is gating on
+  `code_key(token)` rather than the raw token, and it is expected to flip both errors (the false
+  pair drops to the `exact==0` cell, 0.44% positive in test; the true pair rises to the
+  `prefix_ratio==1.0` cell, 88.9% positive) -- inferred from those cells' measured statistics, not
+  confirmed by retraining. Applying it means re-verifying every report `model_number` extraction
+  touches, which has not been done.
 - **Which blockers earn their candidates depends on the catalog.** On Abt-Buy three of the six add
   no completeness the others do not already have. Leave-one-out marginals against the committed
   six-blocker union, measured, not estimated:
@@ -290,20 +506,42 @@ Settled by measurement, recorded so it is not re-litigated:
   The `synth-20k` table and the character-shingle figures are one-off measurements, not a committed
   report — `reports/synth/blocking.md` holds each blocker's standalone row only. The memory failure
   reproduces by running `blocking.evaluate --dataset synth-200k --ann-components 128` without
-  `--without`.
-- **`ann` is the load-bearing blocker.** faiss HNSW over char-3gram TF-IDF reaches PC 0.9562 alone,
-  beating every exact-key blocker combined, because it needs no shared token at all — it is what
-  catches `Bose 161WH` against `Boss 161 Speaker`, a source typo in the brand. Its index is built
-  **single-threaded on purpose**: parallel HNSW construction gave 14,608 / 14,603 / 14,602
+  `--without`. Re-verified 2026-09-14: every marginal-candidate, marginal-PC and character-shingle
+  figure in both tables above reproduced exactly.
+- **`ann` is the load-bearing blocker, and raising its neighbour count `k` at scale is a real,
+  swept-not-tuned lever, now committed.** faiss HNSW over char-3gram TF-IDF reaches PC 0.9562 alone
+  on Abt-Buy, beating every exact-key blocker combined, because it needs no shared token at all —
+  it is what catches `Bose 161WH` against `Boss 161 Speaker`, a source typo in the brand. Its index
+  is built **single-threaded on purpose**: parallel HNSW construction gave 14,608 / 14,603 / 14,602
   candidates across three runs of identical input, and a committed report whose numbers drift is not
   reproducible. Its dense index does not scale, and SVD alone is not the fix. On `synth-20k`,
   projecting to 128 components at the same `k=10` halves its completeness, 0.7705 to 0.3897, at the
-  same candidate count; raising `k` to 50 recovers it to 0.8187 for 631,673 candidates. At
-  `synth-200k`, SVD-128 with `k=10` reaches 0.0597, with ten neighbours crowded out by sibling
-  families about 99 entities wide — so scaling `ann` means raising `k` with the projection, and
-  `default_blocker_set` changes neither until that is measured at 200k. The SVD-128 figures at
-  `k=10` and `k=50` on `synth-20k` are one-off measurements, not a committed report; the 0.0597 at
-  `synth-200k` is in `reports/synth/blocking-200k.md`.
+  same candidate count; raising `k` to 50 recovers it to 0.8187 for 631,673 candidates (re-verified
+  2026-09-14, reproduced exactly; these two remain one-off measurements, not a committed report).
+  At `synth-200k`, SVD-128 with `k=10` reaches only 0.0597, with ten neighbours crowded out by
+  sibling families about 99 entities wide — so scaling `ann` means raising `k` with the projection.
+  `default_blocker_set(ann_neighbours=...)` now exposes `k` as a parameter, mirroring
+  `ann_components`, and a full sweep at `synth-200k` is committed: `k`=10/50/100/150 give PC
+  0.0597/0.2225/0.3805/0.5000, still climbing at `k`=150 — not a plateau, a practical stopping
+  point (`reports/synth/blocking-200k.md`). `default_blocker_set`'s literal default stays `k=10`,
+  what every Abt-Buy/`synth-20k` report was measured with; a larger catalog spends a higher `k`
+  explicitly via `--ann-neighbours`.
+- **A memory bound on `lsh`'s candidate generation is the other lever, and it also works.**
+  Unbounded token LSH cannot run at all on `synth-200k`: 222M raw candidate pairs failed a 1.66 GiB
+  allocation, because nothing capped how many candidates one record's query could contribute before
+  they were all accumulated into one array. `MinHashLSHBlocker(max_neighbours=...)` bounds it the
+  way `standard.py`'s `max_block_size` bounds a runaway exact-key block — a record whose query
+  returns more than the cap contributes zero candidates, counted and surfaced as a warning, same
+  shape as a dropped block. Swept at `synth-200k`: cap=100/300/500 give PC 0.0871/0.3201/0.4042,
+  dropping 138,364/85,041/61,611 of 165,714 records respectively — real completeness, real cost,
+  still climbing at cap=500, not exhausted. `default_blocker_set`'s literal default stays `None`
+  (unbounded), what every Abt-Buy/`synth-20k` report — including the one recording the OOM — was
+  measured with; a catalog past that budget spends a cap explicitly via `--lsh-max-neighbours`.
+  Combined with `ann` at `k`=150, every default blocker now runs on `synth-200k` for the first
+  time — no `--without`, no OOM — reaching union pair completeness **0.8469**
+  (`reports/synth/blocking-200k.md`), against 0.6712 with `lsh` omitted entirely. Neither lever was
+  pushed to its limit; both are available, measured, swept-not-tuned levers for whoever revisits
+  this ceiling.
 - **What blocking still misses is a different identifier system, not a near-miss.** Of 1,118 true
   pairs, 8 survive nothing. They are two failure modes, and neither is fixable by tuning a window or
   a threshold: (a) vendor SKU against distributor part number — `Canon Color Ink Tank - CL41CL` vs
@@ -380,7 +618,7 @@ Settled by measurement, recorded so it is not re-litigated:
   and its resolution problem stays. It is the better calibrated — ECE 0.00084 against Platt's
   0.00374 and Brier 0.00707 against 0.00758, while Platt is *worse* calibrated than the raw
   booster's 0.00082 — but it still collapses where the cost model reads: 6 distinct outputs at or
-  above 0.9 against Platt's 3,761, and recall at `p_hi` 0.95 of 0.3969 against Platt's 0.5354, at
+  above 0.9 against Platt's 9,091, and recall at `p_hi` 0.95 of 0.3969 against Platt's 0.5354, at
   near-equal precision (0.9613 against 0.9538). Neither dominates. Isotonic states probabilities
   honestly and cannot separate confident pairs; Platt separates them and misstates the review band
   by up to 0.22 (the reliability table in `reports/synth/model.md`). Platt stays the default
@@ -388,7 +626,11 @@ Settled by measurement, recorded so it is not re-litigated:
   out-of-fold half of this entry is settled and the Platt half is reopened, not decided: a
   calibrator keeping both properties is the next thing to measure. The `synth-20k` isotonic figures
   come from a one-off comparison, not a committed report: `reports/synth/model.md` measures Platt
-  against the raw booster only.
+  against the raw booster only. Re-verified 2026-09-14 against two independent retrains (identical
+  both times, confirming `model/train.py`'s determinism claim): every figure in this entry
+  reproduced exactly except Platt's distinct-output count, previously recorded as 3,761 -- corrected
+  here to 9,091, the value both retrains gave. Ruled out as the cause: rounding the calibrated
+  probabilities before counting (checked at 2-6 decimal places; none landed near 3,761 either).
 - **The two thresholds are closed-form in the cost ratios, the default is 20 : 2 : 1, and Abt-Buy
   cannot validate it.** Minimizing per-pair expected cost — `(1-p) * C_fm` to merge, `p * C_fs` to
   reject, `C_review` to review — gives `p_hi = 1 - C_review/C_fm` and `p_lo = C_review/C_fs`, so the
@@ -408,7 +650,9 @@ Settled by measurement, recorded so it is not re-litigated:
   (6,717 against the default's 8,197), but that bills the synthetic catalog's own error mix, so it
   is no reason to move the default. It stays 20 : 2 : 1. The 14,435 mid-band count comes from the
   same one-off calibration comparison; the sensitivity grid and its review-queue range are in
-  `reports/synth/model.md`.
+  `reports/synth/model.md`. Re-verified 2026-09-14: the mid-band count and every row of the
+  sensitivity grid reproduced exactly, independently of `reports/synth/model.md`'s own committed
+  table.
 - **Clusters keep the bands' three outcomes: a partition merges only where merging beats both
   review and rejection.** The obvious clusterer is connected components over `p_hi` edges, and on
   the Abt-Buy test split it chains: 4 fused clusters through 11 implied pairs, realized cost 420.
@@ -529,7 +773,11 @@ src/dedup/
                   agglomerative, correlation + evaluate — the CLI behind reports/cluster.md
   synth/          families (seed product -> siblings), corrupt (product -> listings), generate
                   (the catalog and its CLI), realism (seed against synthetic difficulty)
-  service/        FastAPI app, HNSW + inverted index, review queue
+  service/        store (DuckDB schema/connection), batch (run_batch + its CLI), schemas
+                  (API models), review (decision logic), app (FastAPI: batch read routes plus
+                  online lookup), lookup (pure lookup decision logic), build_index (the CLI
+                  that enables lookup for a run) -- blocking/ann.py's AnnIndex and
+                  blocking/standard_index.py's InvertedIndex are the two queryable indexes
 reports/          blocking table, PR curves, cost curves — the defensible results
   baseline_tfidf.md   the TF-IDF number every later stage is measured against
   blocking.md         blocker x completeness x reduction; the union row is the recall ceiling
@@ -564,7 +812,13 @@ reason: either number alone is trivially gamed by moving the threshold.
 - `sentence-transformers` embeddings are complementary to string distance, not a replacement: they catch
   paraphrase and miss fine distinctions (`WH-1000XM4` vs `WH-1000XM5`), string metrics do the opposite.
 - LightGBM over the pair features; a fine-tuned cross-encoder is the optional ceiling comparison.
-- DuckDB/SQLite record store, FastAPI + uvicorn, htmx review UI (deliberately no Node toolchain).
+- **DuckDB**, settled over SQLite for the record store: already an explicit dependency (SQLite
+  needs none, being stdlib, which was the case *for* it), and a better fit for the analytical
+  queries a review queue and batch-run reporting run (aggregates over bands, cluster sizes) than a
+  small transactional workload SQLite would suit better. FastAPI + uvicorn. The htmx review UI is
+  still unbuilt -- `service/` v1 and v2 are both a JSON API only, by scope; DuckDB/FastAPI/uvicorn
+  are proven against real Abt-Buy data (batch) and a real trained scorer (lookup), htmx is not
+  (deliberately no Node toolchain, when it lands).
 
 ## Data
 
@@ -637,7 +891,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (576 passing, 1 skipped)
+pytest                                  # all (665 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -660,11 +914,26 @@ python -m dedup.features.evaluate --dataset abt-buy --out reports/features.md
 
 # the model: F1 against the baseline, calibration quality, cost-derived bands
 # --cost-false-merge / --cost-false-split / --cost-review override the 20 : 2 : 1 default
-python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md
+# --save-scorer persists the fitted, calibrated PairScorer service/batch.py loads
+python -m dedup.model.evaluate --dataset abt-buy --out reports/model.md --save-scorer artifacts/scorer
 
 # clusters: B-cubed per clusterer, the chaining demonstration, what each fix undid
 # --restarts sets correlation clustering's pivot orders; --cost-* as for the model
 python -m dedup.cluster.evaluate --dataset abt-buy --out reports/cluster.md
+
+# batch dedup + review queue: blocking -> scoring -> average-linkage clustering over a
+# catalog with no ground truth, written to a DuckDB file; --cost-* as for the model
+python -m dedup.service.batch --dataset abt-buy --scorer artifacts/scorer --db data/service.duckdb
+
+# the review API over that same DuckDB file (DEDUP_DB_PATH, or pass db_path to create_app)
+DEDUP_DB_PATH=data/service.duckdb uvicorn dedup.service.app:app --reload
+
+# enable online lookup for that run: builds the persisted ann + standard indexes
+python -m dedup.service.build_index --db data/service.duckdb --run-id <run_id> --index-root artifacts/index/<run_id>
+
+# a lookup, once build_index has run for that run_id (source/title required, rest optional)
+curl -X POST localhost:8000/runs/<run_id>/lookup -H "Content-Type: application/json" \
+  -d '{"source": "abt", "title": "Panasonic KX-TS208W Corded Phone"}'
 
 # synthetic catalogs, seeded from Abt-Buy's train split (data/synth/ is gitignored)
 python -m dedup.synth.generate --seed-dataset abt-buy --records 20000 --out data/synth/abt-buy-train-20k --report reports/synth/realism.md
@@ -674,23 +943,28 @@ python -m dedup.synth.generate --seed-dataset abt-buy --records 200000 --out dat
 python -m dedup.eval.baseline --dataset synth-20k --min-similarity 0.2 --out reports/synth/baseline_tfidf.md
 python -m dedup.model.evaluate --dataset synth-20k --out reports/synth/model.md
 
-# past the dense ann budget: --ann-components projects with SVD, --without leaves a blocker out
-python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --without lsh --out reports/synth/blocking-200k.md
+# past the dense ann budget: --ann-components projects with SVD, --ann-neighbours raises k for
+# a catalog whose sibling families crowd out the default, --lsh-max-neighbours bounds lsh's
+# memory, --without leaves a blocker out
+python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --ann-neighbours 150 --lsh-max-neighbours 500 --out reports/synth/blocking-200k.md
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Thirty-three tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
+Thirty-four tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
 integration test in `tests/test_data_abt_buy.py`, one in `tests/test_eval_baseline.py` that
 re-derives the published baseline F1, one in `tests/test_blocking_evaluate.py` that re-derives the
 published union pair completeness, four in `tests/test_features_evaluate.py` that re-derive the
 per-split blocking ceiling and the feature ranking, fourteen in `tests/test_model_evaluate.py`
 that re-derive the headline F1, the calibration properties, the band shape and the blocking-loss
-accounting, and eleven in `tests/test_cluster_evaluate.py` that re-derive the components B-cubed
+accounting, eleven in `tests/test_cluster_evaluate.py` that re-derive the components B-cubed
 measured while planning the stage, the floor and ceiling, the chaining demonstration, the
 objective-against-truth result, and that merging nothing bills exactly what the model report's
-bands route, and one in `tests/test_synth_realism.py` that re-derives the synthetic catalog's
-calibration against Abt-Buy's train split. So a green run does *not* by itself mean the real files were checked, and in
-particular does not mean any published number was reproduced — `pytest -rs` reports the skips.
+bands route, one in `tests/test_synth_realism.py` that re-derives the synthetic catalog's
+calibration against Abt-Buy's train split, and one in `tests/test_data_synthetic.py` that reloads
+Abt-Buy fresh and re-derives its split to verify the committed `synth-20k` catalog's seed
+provenance independently of what its own manifest claims. So a green run does *not* by itself mean
+the real files were checked, and in particular does not mean any published number was reproduced —
+`pytest -rs` reports the skips.
 
 One more test skips for a different reason and is not about the benchmark: the
 sentence-transformers column is opt-in, and its weights are not downloaded. That is the one skip
@@ -701,13 +975,6 @@ If `tests/fixtures/abt-buy/` ever needs a new shape, regenerate it rather than h
 
 ```bash
 python tests/fixtures/make_fixtures.py
-```
-
-Not built yet — intended contract, will fail if invoked:
-
-```bash
-# service
-uvicorn dedup.service.app:app --reload
 ```
 
 ## Commit Messages
@@ -727,9 +994,8 @@ as bullets.>
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `chore`
 
 Scopes — one per module, added as each lands. In use so far: `schema`, `normalize`, `data`,
-`blocking`, `eval`, `features`, `model`, `cluster`, `data-gen` (the `synth/` generator). Reserved for
-modules not yet built: `service`. A commit touching no single module (this file, packaging, CI)
-takes no scope.
+`blocking`, `eval`, `features`, `model`, `cluster`, `data-gen` (the `synth/` generator), `service`.
+A commit touching no single module (this file, packaging, CI) takes no scope.
 
 Rules:
 

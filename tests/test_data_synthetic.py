@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from dedup.data import DATASETS, load_dataset
+from dedup.data.abt_buy import load_abt_buy
 from dedup.data.synthetic import (
     MANIFEST_FILE,
     RECORDS_FILE,
@@ -19,9 +20,11 @@ from dedup.data.synthetic import (
     write_catalog,
 )
 from dedup.schema import Record
-from dedup.synth.generate import main
+from dedup.synth.generate import main, verify_seed_provenance
 
 FIXTURES = Path(__file__).parent / "fixtures" / "abt-buy"
+REAL_ABT_BUY = Path(__file__).parent.parent / "data" / "raw" / "abt-buy"
+SYNTH_20K = Path(__file__).parent.parent / "data" / "synth" / "abt-buy-train-20k"
 # A manifest seeded from the split every report is scored on -- the only one the
 # loader accepts.
 SEEDED = {"seed_split": {"side": "train", "test_fraction": 0.3, "seed": 0}}
@@ -94,10 +97,24 @@ def test_a_catalog_seeded_from_another_split_is_refused(tmp_path):
 def test_both_catalogs_are_registered_as_synthetic():
     for name in ("synth-20k", "synth-200k"):
         spec = DATASETS[name]
-        assert spec.load is load_synthetic
+        assert spec.load.func is load_synthetic
+        assert spec.load.keywords == {"seed_dataset": "abt-buy"}
         assert spec.default_root.parts[:2] == ("data", "synth")
     # The 200k catalog is past the exhaustive baseline, so it claims none.
     assert DATASETS["synth-200k"].notes.baseline_report is None
+
+
+def test_a_catalog_seeded_from_another_dataset_is_refused(tmp_path):
+    """Nothing tied a registry entry to the benchmark it claims to be seeded from --
+    a catalog seeded from a different dataset than the registry expects would have
+    loaded silently. Registered entries bind seed_dataset="abt-buy" via functools.partial."""
+    write_catalog(tmp_path, [synthetic("synthetic:f1:e000:r0")], {**SEEDED, "seed_dataset": "amazon-google"})
+    with pytest.raises(ValueError, match="not 'abt-buy'"):
+        load_synthetic(tmp_path, seed_dataset="abt-buy")
+
+    # Without an expectation to check against, the same catalog loads -- the check
+    # is opt-in per caller, not a property of the file itself.
+    assert load_synthetic(tmp_path)
 
 
 def test_the_cli_seeds_from_the_train_split_and_writes_a_loadable_catalog(tmp_path):
@@ -114,3 +131,18 @@ def test_the_cli_seeds_from_the_train_split_and_writes_a_loadable_catalog(tmp_pa
         r.entity_id for r in load_dataset("abt-buy", FIXTURES)
     }
     assert json.loads((out / MANIFEST_FILE).read_text(encoding="utf-8"))["config"]["seed"] == 0
+
+
+@pytest.mark.skipif(
+    not (REAL_ABT_BUY.is_dir() and SYNTH_20K.is_dir()),
+    reason="Abt-Buy or the synth-20k catalog is not present; see CLAUDE.md > Data / Commands",
+)
+def test_the_committed_synth_20k_catalog_really_is_seeded_from_train():
+    """The non-tautological check: independent of any one `generate.py` run, reload
+    Abt-Buy fresh, re-derive its split with the code as it exists right now, and
+    check the *committed* catalog's embedded seed entities against that -- not
+    against what its own manifest claims. This is what closes the audit gap for the
+    catalogs actually shipped in reports/synth/, not just for a freshly-generated one."""
+    seed_records = load_abt_buy(REAL_ABT_BUY)
+    catalog_records = load_dataset("synth-20k")
+    verify_seed_provenance(catalog_records, seed_records)  # must not raise

@@ -27,15 +27,29 @@ Training runs single-threaded and deterministic for the same reason
 `blocking/ann.py` builds its HNSW index on one thread: a committed report whose
 numbers drift between runs of identical input is not reproducible, and the cost
 here is seconds on a catalog this size.
+
+`PairScorer.save`/`.load` pickle the whole bundle, mirroring `data/synthetic.py`'s
+hash-plus-manifest pattern (write-time SHA-256, load-time refuse-on-mismatch)
+rather than its JSONL mechanism, which does not fit a booster or a calibrator.
+Unpickling runs arbitrary code; that is acceptable only because an artifact is
+produced by this project's own training path, never from untrusted input -- the
+same trust boundary `data/synthetic.py`'s manifest already accepts.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+import json
+import pickle
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
+import lightgbm
 import numpy as np
+import sklearn
 from lightgbm import LGBMClassifier
 
 from dedup.blocking.defaults import block_split
@@ -44,6 +58,9 @@ from dedup.eval.splits import count_true_pairs
 from dedup.features.vectorize import PairFeaturizer, pair_labels
 from dedup.normalize import NormalizedRecord, normalize
 from dedup.schema import Record
+
+SCORER_FILE = "scorer.pkl"
+MANIFEST_FILE = "manifest.json"
 
 DEFAULT_PARAMS: dict[str, object] = {
     "n_estimators": 300,
@@ -169,6 +186,90 @@ class PairScorer:
             zip(self.feature_names, (float(g) for g in gains)),
             key=lambda row: -row[1],
         )
+
+    def save(self, root: Path, *, metadata: Mapping[str, object] | None = None) -> str:
+        """Pickle this scorer to `root/scorer.pkl`, write a sibling manifest, return the hash.
+
+        Featurizer, booster and calibrator are pickled together as one object --
+        the same "servable artifact" bundling this class exists for in the first
+        place, so a caller cannot accidentally load a booster against a
+        differently-fit featurizer. `metadata` is the training provenance a
+        caller wants traceable later (dataset name, split params, seed); it is
+        opaque here and just passed through into the manifest.
+        """
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        payload = pickle.dumps(self)
+        digest = hashlib.sha256(payload).hexdigest()
+        (root / SCORER_FILE).write_bytes(payload)
+        body = {
+            "artifact_sha256": digest,
+            "feature_names": self.feature_names,
+            "n_features": len(self.feature_names),
+            "include_semantic": self.featurizer.include_semantic,
+            "has_calibrator": self.calibrator is not None,
+            "booster_type": type(self.booster).__name__,
+            "lightgbm_version": lightgbm.__version__,
+            "sklearn_version": sklearn.__version__,
+            "created_at": datetime.now(UTC).isoformat(),
+            "metadata": dict(metadata or {}),
+        }
+        (root / MANIFEST_FILE).write_text(
+            json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return digest
+
+    @classmethod
+    def load(cls, root: Path) -> PairScorer:
+        """The inverse of `save`, refused if the artifact no longer matches its manifest.
+
+        Library-version fields are recorded but not enforced: a hard refusal on
+        a routine LightGBM/scikit-learn patch bump would block ordinary dev
+        iteration far more often than it would catch a real skew, and pickle's
+        own cross-version fragility is an accepted, documented limitation here
+        rather than something a manifest field can fix.
+        """
+        root = Path(root)
+        manifest = read_scorer_manifest(root)
+        payload = (root / SCORER_FILE).read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != manifest["artifact_sha256"]:
+            raise ValueError(
+                f"{root / SCORER_FILE} does not match the hash in its manifest -- it was "
+                f"edited, truncated, or regenerated without its manifest"
+            )
+        scorer = pickle.loads(payload)
+        if not isinstance(scorer, cls):
+            raise TypeError(f"{root / SCORER_FILE} does not hold a {cls.__name__}")
+        if scorer.feature_names != manifest["feature_names"]:
+            raise ValueError(
+                f"{root} was pickled with feature columns {scorer.feature_names}, but its "
+                f"manifest records {manifest['feature_names']} -- the featurizer that produced "
+                f"this artifact no longer matches the one described alongside it"
+            )
+        if (scorer.calibrator is not None) != manifest["has_calibrator"]:
+            raise ValueError(
+                f"{root} {'has' if scorer.calibrator is not None else 'has no'} a calibrator, "
+                f"but its manifest says has_calibrator={manifest['has_calibrator']}"
+            )
+        return scorer
+
+
+def read_scorer_manifest(root: Path) -> dict[str, object]:
+    """A saved scorer's manifest, without unpickling the artifact itself.
+
+    Public like `data.synthetic.read_manifest`, for a caller that only wants
+    the hash or feature names -- `service/batch.py`'s `runs` row, for one --
+    and should not have to pay for (or trust) unpickling to get them.
+    """
+    path = Path(root) / MANIFEST_FILE
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{root} has no {MANIFEST_FILE}, so it is not a saved PairScorer. Save one with "
+            f"`PairScorer.save` or `python -m dedup.model.evaluate --save-scorer` "
+            f"(CLAUDE.md > Commands)."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def train_scorer(

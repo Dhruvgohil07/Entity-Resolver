@@ -11,7 +11,7 @@ from dedup.blocking.union import ground_truth
 from dedup.eval.splits import count_true_pairs, kfold_by_entity, split_by_entity
 from dedup.normalize import code_key, normalize
 from dedup.schema import Record
-from dedup.synth.generate import SynthConfig, family_id, generate
+from dedup.synth.generate import SynthConfig, family_id, generate, verify_seed_provenance
 
 SEEDS = [
     ("seed:e01", ["Panasonic 2-Line White Phone - KXTS208W", "Panasonic KX-TS208W Corded Phone"]),
@@ -125,6 +125,41 @@ def test_a_family_never_straddles_a_split_or_a_fold():
     for index, group in enumerate(groups):
         for other in groups[index + 1 :]:
             assert group.isdisjoint(other)
+
+
+# ---------------------------------------------------------------------------
+# Seed provenance
+# ---------------------------------------------------------------------------
+#
+# data/synthetic.py's loader only compares the manifest's recorded seed_split
+# numbers against what a report expects -- it never re-derives the split from the
+# seed dataset's own records, so a `split_by_entity` change could move an entity
+# from train to test while those two numbers stay the same. verify_seed_provenance
+# closes that by recomputing the split fresh and checking real entity membership.
+
+
+def test_verify_seed_provenance_accepts_a_catalog_seeded_only_from_train():
+    seeds = make_seeds()
+    train, test = split_by_entity(seeds, test_fraction=0.3, seed=0)
+    assert test  # the split must actually hold something out, or this proves nothing
+    catalog = generate(train, CONFIG)
+    verify_seed_provenance(catalog.records, seeds, test_fraction=0.3, seed=0)  # must not raise
+
+
+def test_verify_seed_provenance_refuses_a_test_side_entity():
+    seeds = make_seeds()
+    train, test = split_by_entity(seeds, test_fraction=0.3, seed=0)
+    assert test
+    catalog = generate(train, CONFIG)
+    leaked_entity_id = test[0].entity_id
+    tampered = catalog.records[0].model_copy(
+        update={
+            "raw_attributes": {**catalog.records[0].raw_attributes, "seed_entity_id": leaked_entity_id}
+        }
+    )
+    records = [tampered, *catalog.records[1:]]
+    with pytest.raises(ValueError, match="not on the train side"):
+        verify_seed_provenance(records, seeds, test_fraction=0.3, seed=0)
 
 
 # ---------------------------------------------------------------------------

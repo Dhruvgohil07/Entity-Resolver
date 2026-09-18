@@ -12,13 +12,21 @@ booster whose 33 columns were produced by a different featurizer is scoring
 different features under the same names.
 """
 
+import json
 from dataclasses import FrozenInstanceError
 
 import numpy as np
 import pytest
 
 from dedup.features.vectorize import PairFeaturizer
-from dedup.model.train import DEFAULT_PARAMS, prepare, train_scorer
+from dedup.model.calibrate import PlattCalibrator
+from dedup.model.train import (
+    DEFAULT_PARAMS,
+    PairScorer,
+    prepare,
+    read_scorer_manifest,
+    train_scorer,
+)
 from dedup.schema import Record
 
 BRANDS = ["Panasonic", "Canon", "Sony", "Bose", "Cuisinart", "LG", "HP", "Nikon"]
@@ -190,3 +198,67 @@ def test_a_scorer_is_frozen(scorer):
     """Swapping a featurizer under a fitted booster is the skew this prevents."""
     with pytest.raises(FrozenInstanceError):
         scorer.featurizer = PairFeaturizer()
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def calibrated_scorer(scorer, split):
+    raw = scorer.raw_scores(split.records, split.pair_keys)
+    calibrator = PlattCalibrator().fit(raw, split.labels)
+    return scorer.with_calibrator(calibrator)
+
+
+def test_a_saved_scorer_round_trips(calibrated_scorer, split, tmp_path):
+    """Featurizer, booster and calibrator together, or the save is not servable."""
+    digest = calibrated_scorer.save(tmp_path, metadata={"dataset": "test"})
+    loaded = PairScorer.load(tmp_path)
+
+    assert loaded.feature_names == calibrated_scorer.feature_names
+    assert np.array_equal(
+        loaded.probabilities(split.records, split.pair_keys),
+        calibrated_scorer.probabilities(split.records, split.pair_keys),
+    )
+    manifest = read_scorer_manifest(tmp_path)
+    assert manifest["artifact_sha256"] == digest
+    assert manifest["has_calibrator"] is True
+    assert manifest["metadata"] == {"dataset": "test"}
+
+
+def test_loading_without_a_manifest_is_refused(tmp_path):
+    with pytest.raises(FileNotFoundError, match="PairScorer"):
+        PairScorer.load(tmp_path)
+
+
+def test_a_tampered_artifact_is_refused(scorer, tmp_path):
+    scorer.save(tmp_path)
+    with (tmp_path / "scorer.pkl").open("ab") as handle:
+        handle.write(b"\x00")
+    with pytest.raises(ValueError, match="does not match the hash"):
+        PairScorer.load(tmp_path)
+
+
+def test_a_manifest_naming_the_wrong_feature_columns_is_refused(scorer, tmp_path):
+    # A stale manifest edited by hand, or one written alongside a differently
+    # fit featurizer -- either way, the columns a caller thinks they are
+    # scoring are not the ones this artifact actually has.
+    scorer.save(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["feature_names"] = ["not_a_real_column"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="feature columns"):
+        PairScorer.load(tmp_path)
+
+
+def test_a_manifest_disagreeing_about_the_calibrator_is_refused(scorer, tmp_path):
+    scorer.save(tmp_path)  # scorer has no calibrator
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["has_calibrator"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="has_calibrator"):
+        PairScorer.load(tmp_path)

@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from dedup.blocking.ann import DEFAULT_NEIGHBOURS as ANN_DEFAULT_NEIGHBOURS
 from dedup.blocking.base import Blocker, BlockerRun
 from dedup.blocking.defaults import default_blocker_set
 from dedup.blocking.pairs import total_pairs, unpack
@@ -168,6 +169,22 @@ def render_markdown(
     )
     intro = notes.passage("blocking.intro", "")
     intro_block = f"\n{intro}\n" if intro else ""
+    if report.omitted:
+        omitted_names = ", ".join(f"`{name}`" for name in report.omitted)
+        ceiling_claim = f"""**The union row is the only one the rest of the pipeline inherits \
+on this run** — but this run left {omitted_names} out. Its pair completeness of \
+**{ceiling:.4f}** is therefore a **lower bound** on the default blocker set's ceiling, not the
+ceiling itself: the omitted blocker could only add candidates, never remove them, so the
+default set's true completeness is at least this high. The
+{report.n_missed} true pairs no blocker *here* emitted are never scored by `features/`,
+never seen by `model/`, and never reach `cluster/` — on this run. Whether the omitted
+blocker recovers any of them is not measured until it runs."""
+    else:
+        ceiling_claim = f"""**The union row is the only one the rest of the pipeline inherits.** Its pair
+completeness of **{ceiling:.4f}** is a hard ceiling on system recall: the
+{report.n_missed} true pairs no blocker emitted are never scored by `features/`,
+never seen by `model/`, and never reach `cluster/`. No amount of model work
+recovers them."""
     honest = "\n".join(
         bullet
         for bullet in (
@@ -215,11 +232,7 @@ not an error.
 
 ## What this means
 
-**The union row is the only one the rest of the pipeline inherits.** Its pair
-completeness of **{ceiling:.4f}** is a hard ceiling on system recall: the
-{report.n_missed} true pairs no blocker emitted are never scored by `features/`,
-never seen by `model/`, and never reach `cluster/`. No amount of model work
-recovers them.
+{ceiling_claim}
 
 Individual blockers are *expected* to be mediocre. They earn their place by failing
 differently — a blocker with low standalone PC is worth keeping if it lifts the union,
@@ -250,6 +263,20 @@ def main(argv: list[str] | None = None) -> int:
         "outgrows its memory budget, and it changes ann's candidates",
     )
     parser.add_argument(
+        "--ann-neighbours",
+        type=int,
+        default=None,
+        help="override ann's HNSW neighbour count k -- needed once a projection's neighbourhoods "
+        f"outgrow the default {ANN_DEFAULT_NEIGHBOURS}, and it changes ann's candidates",
+    )
+    parser.add_argument(
+        "--lsh-max-neighbours",
+        type=int,
+        default=None,
+        help="cap lsh's candidates per record -- needed once unbounded LSH outgrows a single "
+        "array allocation, and any record over the cap loses its candidates entirely",
+    )
+    parser.add_argument(
         "--without",
         action="append",
         default=[],
@@ -261,7 +288,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     records = [normalize(record) for record in load_dataset(args.dataset, args.root)]
-    blockers = default_blocker_set(ann_components=args.ann_components)
+    blockers = default_blocker_set(
+        ann_components=args.ann_components,
+        ann_neighbours=(
+            ANN_DEFAULT_NEIGHBOURS if args.ann_neighbours is None else args.ann_neighbours
+        ),
+        lsh_max_neighbours=args.lsh_max_neighbours,
+    )
     for prefix in args.without:
         if not any(blocker.name.startswith(prefix) for blocker in blockers):
             parser.error(f"--without {prefix!r} matches no default blocker")
@@ -273,6 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         omitted=omitted,
     )
     flags = "" if args.ann_components is None else f" --ann-components {args.ann_components}"
+    flags += "" if args.ann_neighbours is None else f" --ann-neighbours {args.ann_neighbours}"
+    flags += (
+        ""
+        if args.lsh_max_neighbours is None
+        else f" --lsh-max-neighbours {args.lsh_max_neighbours}"
+    )
     flags += "".join(f" --without {prefix}" for prefix in args.without)
     markdown = render_markdown(
         report,

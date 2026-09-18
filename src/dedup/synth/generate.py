@@ -248,6 +248,47 @@ def generate(seeds: Sequence[Record], config: SynthConfig) -> SynthCatalog:
     )
 
 
+def verify_seed_provenance(
+    catalog_records: Sequence[Record],
+    seed_records: Sequence[Record],
+    *,
+    test_fraction: float = DEFAULT_TEST_FRACTION,
+    seed: int = DEFAULT_SEED,
+) -> None:
+    """Refuse a catalog whose embedded seed entities are not really on the train side.
+
+    `data/synthetic.py`'s loader only compares the manifest's recorded `seed_split`
+    numbers (test_fraction, seed) against what a report expects -- it never re-derives
+    the split from the seed dataset's own records. That check cannot catch a
+    `split_by_entity` change (or a hand-edited manifest) that moves an entity from
+    train to test without changing either number: the two recorded numbers can stay
+    correct while the *set* of entities they produce drifts.
+
+    This closes that gap by reloading `seed_records` and recomputing the split with
+    the **current** code, then checking every seed entity id embedded in the catalog
+    (`raw_attributes["seed_entity_id"]`) against the train side that produces --
+    not what the manifest claims. Deliberately not called from `load_synthetic`,
+    which stays free of a hard dependency on the seed dataset being present; call
+    this from `main()` after generating, or standalone against a catalog already on
+    disk (see `tests/test_synth_generate.py`).
+    """
+    train, _ = split_by_entity(list(seed_records), test_fraction=test_fraction, seed=seed)
+    train_entity_ids = {record.entity_id for record in train}
+    leaked = sorted(
+        {
+            entity_id
+            for record in catalog_records
+            if (entity_id := record.raw_attributes.get("seed_entity_id")) not in train_entity_ids
+        }
+    )
+    if leaked:
+        raise ValueError(
+            f"{len(leaked)} seed entity id(s) behind this catalog are not on the train side "
+            f"of the seed split just re-derived from the real seed records, e.g. {leaked[:3]} "
+            f"-- the catalog's manifest claims a seed_split its records do not actually match"
+        )
+
+
 def catalog_manifest(
     catalog: SynthCatalog,
     *,
@@ -295,6 +336,12 @@ def main(argv: list[str] | None = None) -> int:
     # refuses to load one.
     train, _ = split_by_entity(records, test_fraction=DEFAULT_TEST_FRACTION, seed=DEFAULT_SEED)
     catalog = generate(train, SynthConfig(target_records=args.records, seed=args.seed))
+    # Currently a no-op given generate()'s implementation -- every seed entity id it
+    # emits is drawn from `train` in this same call, so it cannot yet disagree. It is
+    # a safety net against a future change to generate() that draws from elsewhere;
+    # the check that actually closes the gap is the standalone one against a catalog
+    # already on disk, reloading the seed dataset independently (see test suite).
+    verify_seed_provenance(catalog.records, records, test_fraction=DEFAULT_TEST_FRACTION, seed=DEFAULT_SEED)
     digest = write_catalog(
         args.out,
         catalog.records,

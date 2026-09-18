@@ -28,6 +28,7 @@ from dedup.model.evaluate import (
     render_markdown,
 )
 from dedup.model.threshold import BandSummary, CostModel
+from dedup.model.train import PairScorer
 
 REAL_DATA = Path(__file__).parent.parent / "data" / "raw" / "abt-buy"
 BASELINE_REPORT = Path(__file__).parent.parent / "reports" / "baseline_tfidf.md"
@@ -113,6 +114,9 @@ def synthetic_report(**changes):
         ],
         importance=[("code_token_jaccard", 100.0), ("desc_len_ratio", 50.0)],
         n_missed_confidently=5,
+        # Unused by render_markdown -- only main()'s --save-scorer branch reads
+        # report.scorer, and nothing here fits a real one for a report this cheap.
+        scorer=PairScorer(featurizer=None, booster=None),
     )
     return replace(base, **changes)
 
