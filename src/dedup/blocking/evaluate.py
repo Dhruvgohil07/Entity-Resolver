@@ -61,6 +61,20 @@ _CEILING_BULLET = """\
 
 
 @dataclass(frozen=True)
+class Marginal:
+    """What one blocker adds that no other blocker in the run already found.
+
+    Measured by leaving it out and re-unioning, not by counting what it emits:
+    a blocker can contribute a million candidates and zero completeness the
+    others did not already have, which is the whole point of reporting this.
+    """
+
+    name: str
+    marginal_candidates: int
+    marginal_pair_completeness: float
+
+
+@dataclass(frozen=True)
 class BlockingReport:
     dataset: str
     n_records: int
@@ -72,6 +86,7 @@ class BlockingReport:
     n_missed: int
     warnings: list[str]
     omitted: tuple[str, ...] = ()  # default blockers left out of this run, by name
+    marginals: tuple[Marginal, ...] = ()  # empty unless leave_one_out was asked for
 
 
 def evaluate(
@@ -80,6 +95,7 @@ def evaluate(
     *,
     dataset: str,
     omitted: Sequence[str] = (),
+    leave_one_out: bool = False,
 ) -> BlockingReport:
     n = len(records)
     truth, n_true = ground_truth(records)
@@ -97,6 +113,24 @@ def evaluate(
         for a, b in zip(left[:MISSED_EXAMPLES], right[:MISSED_EXAMPLES])
     ]
 
+    # Leave-one-out marginals: what each blocker adds that the *others* did
+    # not already find. Off by default because it costs one extra union per
+    # blocker over the whole candidate set, which is real money at 200k scale.
+    marginals: list[Marginal] = []
+    if leave_one_out:
+        for index, run in enumerate(runs):
+            without = union_run([r for j, r in enumerate(runs) if j != index])
+            without_score = score(without, truth, n, n_true_pairs_total=n_true)
+            marginals.append(
+                Marginal(
+                    name=run.name,
+                    marginal_candidates=union_score.n_candidates - without_score.n_candidates,
+                    marginal_pair_completeness=(
+                        union_score.pair_completeness - without_score.pair_completeness
+                    ),
+                )
+            )
+
     return BlockingReport(
         dataset=dataset,
         n_records=n,
@@ -108,6 +142,7 @@ def evaluate(
         n_missed=int(missed.size),
         warnings=[f"{run.name}: {w}" for run in runs for w in run.warnings],
         omitted=tuple(omitted),
+        marginals=tuple(marginals),
     )
 
 
@@ -185,6 +220,38 @@ completeness of **{ceiling:.4f}** is a hard ceiling on system recall: the
 {report.n_missed} true pairs no blocker emitted are never scored by `features/`,
 never seen by `model/`, and never reach `cluster/`. No amount of model work
 recovers them."""
+    marginal_section = ""
+    if report.marginals:
+        marginal_rows = "\n".join(
+            f"| `{m.name}` | +{m.marginal_candidates:,} | +{m.marginal_pair_completeness:.4f} |"
+            for m in report.marginals
+        )
+        subsumed = [m.name for m in report.marginals if m.marginal_pair_completeness <= 0.0]
+        if subsumed:
+            names = ", ".join(f"`{n}`" for n in subsumed)
+            one = len(subsumed) == 1
+            verdict = (
+                f"{names} {'adds' if one else 'add'} no completeness the other blockers do not "
+                f"already have on this catalog. {'It is not' if one else 'None is'} deleted: "
+                f"a negative result someone can re-run is evidence, the same claim asserted from "
+                f"a deleted experiment is not, and the verdict is catalog-specific — it has "
+                f"already differed between Abt-Buy and `synth-20k`."
+            )
+        else:
+            verdict = "Every blocker in this run lifts the union by itself."
+        marginal_section = f"""
+### What each blocker adds that the others do not
+
+Leave-one-out against the union above: drop one blocker, re-union the rest, and report
+the difference. A blocker's standalone row in the table cannot show this — two blockers
+can each reach high completeness on exactly the same pairs.
+
+| blocker | marginal candidates | marginal PC |
+| --- | ---: | ---: |
+{marginal_rows}
+
+{verdict}
+"""
     honest = "\n".join(
         bullet
         for bullet in (
@@ -225,6 +292,7 @@ python -m dedup.blocking.evaluate --dataset {report.dataset}{flags} --out {out}
 There is deliberately no precision, F1 or accuracy column. A blocker's output is
 overwhelmingly non-duplicates by construction; discarding non-duplicates is the job,
 not an error.
+{marginal_section}
 
 ### Ceiling caveats
 
@@ -284,6 +352,13 @@ def main(argv: list[str] | None = None) -> int:
         help="leave out every default blocker whose name starts with NAME (repeatable); the "
         "report names what was left out, since its union is then not the default ceiling",
     )
+    parser.add_argument(
+        "--leave-one-out",
+        action="store_true",
+        help="also report what each blocker adds that the others do not, by dropping it and "
+        "re-unioning. Costs one extra union per blocker over the whole candidate set, so it is "
+        "opt-in rather than always-on at 200k scale",
+    )
     parser.add_argument("--out", type=Path, default=None, help="write the markdown report here")
     args = parser.parse_args(argv)
 
@@ -304,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         [blocker for blocker in blockers if blocker.name not in omitted],
         dataset=args.dataset,
         omitted=omitted,
+        leave_one_out=args.leave_one_out,
     )
     flags = "" if args.ann_components is None else f" --ann-components {args.ann_components}"
     flags += "" if args.ann_neighbours is None else f" --ann-neighbours {args.ann_neighbours}"
@@ -313,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         else f" --lsh-max-neighbours {args.lsh_max_neighbours}"
     )
     flags += "".join(f" --without {prefix}" for prefix in args.without)
+    flags += " --leave-one-out" if args.leave_one_out else ""
     markdown = render_markdown(
         report,
         notes=DATASETS[args.dataset].notes,

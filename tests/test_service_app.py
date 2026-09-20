@@ -5,6 +5,8 @@ pagination and `review.py`'s error mapping, independent of model fixtures
 (that end-to-end path is `tests/test_service_batch.py`'s job).
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +16,7 @@ from dedup.model.threshold import BandAssignment, CostModel
 from dedup.normalize import normalize
 from dedup.schema import Record
 from dedup.service import store
-from dedup.service.app import create_app
+from dedup.service.app import create_app, get_conn
 
 
 def rec(record_id: str, title: str):
@@ -158,3 +160,66 @@ def test_pagination_round_trip(seeded):
     body = client.get(f"/runs/{run_id}/records", params={"limit": 1, "offset": 1}).json()
     assert (body["limit"], body["offset"], body["total"]) == (1, 1, 3)
     assert len(body["items"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: what each request may and may not share
+
+
+def test_a_request_gets_a_private_cursor_not_the_apps_connection(seeded):
+    """Every route here is `def`, so Starlette runs them in a thread-pool and
+    two requests really do overlap. Handing them one connection object is not
+    a throughput question but a correctness one: a DuckDB transaction belongs
+    to the connection, so one request's BEGIN encloses another's reads, and a
+    second concurrent writer raises "cannot start a transaction within a
+    transaction" and leaves the connection wedged in "Current transaction is
+    aborted" -- where every later query on it, from any route, fails until
+    the process restarts.
+
+    Both halves are asserted, because either alone can pass while the bug is
+    live: distinct objects, *and* genuinely independent transaction contexts.
+    """
+    client, _ = seeded
+    app = client.app
+    request = SimpleNamespace(app=app)
+
+    first, second = get_conn(request), get_conn(request)
+    conn_a, conn_b = next(first), next(second)
+    try:
+        assert conn_a is not app.state.conn
+        assert conn_b is not app.state.conn
+        assert conn_a is not conn_b
+
+        # The wedging scenario, in miniature: on one shared connection the
+        # second BEGIN raises. On two cursors both stand.
+        conn_a.execute("BEGIN TRANSACTION")
+        conn_b.execute("BEGIN TRANSACTION")
+        conn_a.execute("ROLLBACK")
+        conn_b.execute("ROLLBACK")
+    finally:
+        for generator in (first, second):
+            with pytest.raises(StopIteration):
+                next(generator)
+
+
+def test_an_uncommitted_write_is_invisible_to_another_request(seeded):
+    """The dirty-read half of the same bug. A GET arriving mid-`apply_lookup`
+    must see the store as it was, not a half-written run -- which is what
+    sharing the connection would give it, since the two requests would be
+    inside one transaction."""
+    client, run_id = seeded
+    app = client.app
+    # Held, not inlined: the dependency is a generator, and dropping it lets
+    # the GC run its `finally` and close the cursor out from under the test.
+    dependency = get_conn(SimpleNamespace(app=app))
+    writer = next(dependency)
+
+    before = client.get(f"/runs/{run_id}").json()["n_records"]
+    writer.execute("BEGIN TRANSACTION")
+    writer.execute("UPDATE runs SET n_records = n_records + 99 WHERE run_id = ?", [run_id])
+    try:
+        assert client.get(f"/runs/{run_id}").json()["n_records"] == before
+    finally:
+        writer.execute("ROLLBACK")
+        dependency.close()
+    assert client.get(f"/runs/{run_id}").json()["n_records"] == before

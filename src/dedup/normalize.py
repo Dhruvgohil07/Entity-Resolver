@@ -124,70 +124,15 @@ def _normalize_brand(folded_brand: str) -> str:
 # Model-number extraction
 # ---------------------------------------------------------------------------
 
-# A "model-number-shaped" token: letters/digits/hyphens only, 4-20 chars,
-# with at least one digit AND at least one letter. That mix is what excludes
-# plain words ("quickbooks"), years, and price-like digit runs while still
-# catching "PSLX350H", "KX-FA83", "cd384-aisk9".
-_MODEL_TOKEN_RE = re.compile(r"^[A-Za-z0-9-]+$")
-_TRAILING_PUNCT_RE = re.compile(r"[,./=]+$")
-
-# A spec is not a model number. "1200W", "12MP" and "500GB" all pass the
-# digit-and-letter shape test above, but they describe the product instead of
-# identifying it. model_number is the highest-weight blocking key, so a spec
-# admitted here puts every 1200-watt product from every brand in one block --
-# a false key is much more expensive than a missing one.
-#
-# Matched as <digits><suffix> against a curated list. The list is deliberately
-# conservative, since a suffix that collides with a real vendor code costs
-# recall on the strongest signal there is: "wh" is excluded (Bose 161WH is a
-# model, not 161 watt-hours) and so is "a" (HP Officejet 8500A/6500A).
-# Single-letter suffixes only matter above the 4-character floor anyway, so
-# "12V", "55W" and "4K" never reach this check.
-_SPEC_UNIT_SUFFIXES = frozenset(
-    {
-        "w", "kw", "v", "ma", "mah", "ah",
-        "mp", "kb", "mb", "gb", "tb",
-        "hz", "khz", "mhz", "ghz",
-        "mm", "cm", "m", "in", "ft", "yd",
-        "g", "kg", "oz", "lb", "lbs",
-        "ml", "l", "qt", "gal",
-        "p", "k", "fps", "dpi", "ppi", "rpm", "btu", "hp",
-        "pk", "ct", "pc",
-    }
-)
-# No decimal branch: _MODEL_TOKEN_RE already rejects any token containing ".",
-# so a spec is only ever reached here in its digits-then-letters form.
-_SPEC_TOKEN_RE = re.compile(r"^\d+([A-Za-z]+)$")
-
-
-def _clean_token(token: str) -> str:
-    return _TRAILING_PUNCT_RE.sub("", token)
-
-
-def _is_spec_token(token: str) -> bool:
-    match = _SPEC_TOKEN_RE.match(token)
-    return match is not None and match.group(1).lower() in _SPEC_UNIT_SUFFIXES
-
-
-def _qualifies_as_model_number(token: str) -> bool:
-    if not (4 <= len(token) <= 20):
-        return False
-    if not _MODEL_TOKEN_RE.match(token):
-        return False
-    if not (any(c.isdigit() for c in token) and any(c.isalpha() for c in token)):
-        return False
-    return not _is_spec_token(token)
-
-
 # Separators are the difference between "KXTS208W" (Abt) and "KX-TS208W" (Buy)
 # -- the same Panasonic phone, written to two house styles. Both are correct as
 # printed vendor codes, so `model_number` keeps whichever the source used; this
 # is the form used to decide whether two codes are *the same code*.
 #
 # Measured, not assumed: on Abt-Buy an exact model_number blocker reaches pair
-# completeness 0.3354, and the same blocker keyed on this stripped form reaches
-# 0.5349. Roughly a fifth of achievable recall on the strongest key there is,
-# lost to punctuation.
+# completeness 0.3336, and the same blocker keyed on this stripped form reaches
+# 0.5832. Roughly two fifths of achievable recall on the strongest key there
+# is, lost to punctuation.
 _MODEL_KEY_STRIP_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -219,6 +164,91 @@ def code_key(token: str) -> str:
     """
     decomposed = unicodedata.normalize("NFKD", token).casefold()
     return _MODEL_KEY_STRIP_RE.sub("", decomposed)
+
+
+# A "model-number-shaped" token: 4-20 characters *as the source printed it*,
+# whose comparison form carries at least one digit AND at least one letter.
+# That mix is what excludes plain words ("quickbooks"), years, and price-like
+# digit runs while still catching "PSLX350H", "KX-FA83", "cd384-aisk9". The
+# length gate stays on the printed token deliberately -- see
+# `_qualifies_as_model_number`.
+_TRAILING_PUNCT_RE = re.compile(r"[,./=]+$")
+
+# A spec is not a model number. "1200W", "12MP" and "500GB" all pass the
+# digit-and-letter shape test above, but they describe the product instead of
+# identifying it. model_number is the highest-weight blocking key, so a spec
+# admitted here puts every 1200-watt product from every brand in one block --
+# a false key is much more expensive than a missing one.
+#
+# Matched as <digits><suffix> against a curated list. The list is deliberately
+# conservative, since a suffix that collides with a real vendor code costs
+# recall on the strongest signal there is: "wh" is excluded (Bose 161WH is a
+# model, not 161 watt-hours) and so is "a" (HP Officejet 8500A/6500A).
+# Single-letter suffixes only matter above the 4-character floor anyway, so
+# "12V", "55W" and "4K" never reach this check.
+_SPEC_UNIT_SUFFIXES = frozenset(
+    {
+        "w", "kw", "v", "ma", "mah", "ah",
+        "mp", "kb", "mb", "gb", "tb",
+        "hz", "khz", "mhz", "ghz",
+        "mm", "cm", "m", "in", "ft", "yd",
+        "g", "kg", "oz", "lb", "lbs",
+        "ml", "l", "qt", "gal",
+        "p", "k", "fps", "dpi", "ppi", "rpm", "btu", "hp",
+        "pk", "ct", "pc",
+    }
+)
+# No decimal branch: this is matched against `code_key`'s output, which has
+# already discarded the ".", so "1.5TB" arrives as "15tb" and is caught by the
+# digits-then-letters form like any other spec.
+_SPEC_TOKEN_RE = re.compile(r"^\d+([A-Za-z]+)$")
+
+
+def _clean_token(token: str) -> str:
+    return _TRAILING_PUNCT_RE.sub("", token)
+
+
+def _is_spec_token(key: str) -> bool:
+    match = _SPEC_TOKEN_RE.match(key)
+    return match is not None and match.group(1) in _SPEC_UNIT_SUFFIXES
+
+
+def _qualifies_as_model_number(token: str) -> bool:
+    """Shape test, applied to the token's `code_key` rather than to the token
+    as the source wrote it.
+
+    The distinction is not cosmetic, and getting it wrong was a real defect.
+    An earlier version tested the raw token against a `^[A-Za-z0-9-]+$`
+    shape, which rejects "/" -- so on
+
+        'Samsung YP-S2ZW 1GB Flash MP3 Player - YP-S2ZG/XAA'
+
+    the trailing, correct code failed the gate, extraction fell through to
+    the leading convention, and the record was keyed under a *different*
+    listing's code. Measured on the Abt-Buy test split, that one disagreement
+    produced the pipeline's only cluster fusion surviving both cost-based
+    clusterers (a Green/White pair at p=0.9940) together with a false
+    negative on the same record's true partner at p=0.0074 -- the false pair
+    outranking the true one, which no clustering objective over those
+    probabilities can undo.
+
+    So the rule is: a token is a model number when its *comparison form* is
+    model-number-shaped. That is the form `_model_number_key` blocks on and
+    `blocking/` indexes, and a gate that disagrees with the key it feeds is
+    the same class of bug as two implementations of the key itself.
+
+    The 4-20 length gate is the one thing still measured on the token *as
+    printed*, and that is deliberate rather than an oversight: moving it onto
+    the key drops real vendor codes whose key is shorter than four characters
+    -- "XM-6", "GR-4" and "IP-3" all key to three -- which was measured on the
+    real catalog, not reasoned about.
+    """
+    if not (4 <= len(token) <= 20):
+        return False
+    key = code_key(token)
+    if not (any(c.isdigit() for c in key) and any(c.isalpha() for c in key)):
+        return False
+    return not _is_spec_token(key)
 
 
 def _model_number_key(model_number: str | None) -> str | None:

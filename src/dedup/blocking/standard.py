@@ -4,7 +4,7 @@ The cheapest blocker there is, and on clean vendor codes the most precise. Its
 weakness is that it is exact -- `KXTS208W` and `KX-TS208W` are the same
 Panasonic phone and do not share a key unless something has already reduced
 them to a common form. That reduction is `normalize.model_number_key`, and it
-is worth pair completeness 0.3354 -> 0.5349 on Abt-Buy by itself.
+is worth pair completeness 0.3336 -> 0.5832 on Abt-Buy by itself.
 
 A key function takes the whole record sequence rather than one record, because
 the most productive key here is corpus-dependent: "a token rare enough to be
@@ -43,7 +43,7 @@ def code_token_keys(records: Sequence[NormalizedRecord]) -> list[Iterable[str]]:
     `_extract_model_number` commits to a single token per title, and when it
     picks the wrong one the pair is lost. Indexing every token that *looks*
     like a code recovers those: measured pair completeness 0.6708 against
-    0.5349 for the single extracted code, at 2,072 candidates.
+    0.5832 for the single extracted code, at 2,072 candidates.
 
     Keys go through `normalize.code_key`, the same rule the model-number key
     uses, so the two cannot drift apart and a serve-time index can reproduce

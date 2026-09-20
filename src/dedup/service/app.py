@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -96,17 +96,44 @@ def _review_item(
     )
 
 
-def get_conn(request: Request) -> duckdb.DuckDBPyConnection:
-    """`request.app.state.conn` -- correctly scoped per app instance without
-    needing to close over anything from `create_app`, which matters here:
-    with `from __future__ import annotations` in effect, FastAPI resolves a
-    route's `Annotated[..., Depends(...)]` hints against the function's
-    *module* globals, not an enclosing closure. A `get_conn` (or a `ConnDep`
-    alias pointing at one) defined *inside* `create_app` is invisible to that
-    resolution and silently falls back to treating `conn` as a query
-    parameter -- caught by every route in this file returning 422 until this
-    moved out to module scope."""
-    return request.app.state.conn
+def get_conn(request: Request) -> Iterator[duckdb.DuckDBPyConnection]:
+    """One DuckDB *cursor* per request, off the app's single connection.
+
+    Defined at module scope, not inside `create_app`, and that is not a
+    style choice: with `from __future__ import annotations` in effect,
+    FastAPI resolves a route's `Annotated[..., Depends(...)]` hints against
+    the function's *module* globals, not an enclosing closure. A `get_conn`
+    (or a `ConnDep` alias pointing at one) defined inside `create_app` is
+    invisible to that resolution and silently falls back to treating `conn`
+    as a query parameter -- caught by every route in this file returning 422
+    until this moved out to module scope.
+
+    Handing every route the *same* connection object, which is what this
+    used to do, is a genuine bug rather than a throughput question, because
+    a DuckDB transaction belongs to the connection. Every route here is
+    `def`, not `async def`, so Starlette runs them in a thread-pool and they
+    genuinely execute in parallel; two of them on one connection means one
+    request's `BEGIN TRANSACTION` (`store.apply_lookup`'s, say) encloses
+    another's reads, and a second concurrent writer hits "cannot start a
+    transaction within a transaction". Measured, not inferred: two threads
+    running that loop against one shared connection failed all 100
+    transactions and left the connection wedged in "Current transaction is
+    aborted", where every later query on it -- including plain reads from
+    unrelated routes -- fails until the process restarts.
+
+    `conn.cursor()` is DuckDB's own answer: a second connection onto the
+    same database, with its own transaction context, so MVCC arbitrates
+    instead of one request corrupting another's. The per-`run_id` lock below
+    is a different guard for a different hazard and does not subsume this
+    one -- it cannot, since `/runs` has no `run_id` to lock on, and two
+    lookups against *different* runs would wedge the shared connection while
+    each politely held its own lock.
+    """
+    cursor = request.app.state.conn.cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
 
 
 ConnDep = Annotated[duckdb.DuckDBPyConnection, Depends(get_conn)]
@@ -115,18 +142,25 @@ ConnDep = Annotated[duckdb.DuckDBPyConnection, Depends(get_conn)]
 def _lock_for(app: FastAPI, run_id: str) -> threading.Lock:
     """One `threading.Lock` per `run_id`, created on first use.
 
+    Guards the two things a cursor cannot: the **in-memory mutable indexes**
+    and the **read-modify-write** shape of a lookup.
+
     Every route in this file is `def`, not `async def`, so FastAPI/Starlette
     runs them in a thread-pool -- concurrent requests genuinely execute in
-    parallel threads today, not sequentially. A single DuckDB connection and,
-    worse, the in-memory mutating `AnnIndex`/`InvertedIndex` objects the
-    lookup route caches below are both unsafe under that: two threads
-    calling `index.add()`/`.search()` on the same FAISS `IndexHNSWFlat`
-    concurrently is a real hazard, since `search()` actively traverses a
-    graph another thread's `add()` may be rewriting. Held for the duration
-    of any route touching the connection or a mutable index -- both the
-    lookup route and, in fairness, the existing review-decision route --
-    throughput-limiting by design, the same "out of scope on purpose"
-    posture the module docstring already takes for batch execution.
+    parallel threads today, not sequentially. Two threads calling
+    `index.add()` and `.query_one()` on the same FAISS `IndexHNSWFlat` is a
+    real hazard, since a query actively traverses a graph another thread's
+    `add()` may be rewriting, and no database-level guard touches that.
+    Lookup is also read-modify-write across several statements -- decide
+    against the current clusters, then write -- so two concurrent lookups of
+    the *same* new product could each decide "no cluster to join" and create
+    two singletons that should have been one.
+
+    It is deliberately **not** the guard for the shared DuckDB connection;
+    `get_conn` hands out a per-request cursor for that. The two are not
+    interchangeable: a lock keyed on `run_id` has nothing to key on for
+    `/runs`, and two lookups against different runs would wedge a shared
+    connection while each held its own lock quite correctly.
 
     Guarded by one global lock over the dict itself: two threads racing to
     create the *first* lock for the same unseen `run_id` is the one unsafe
@@ -364,6 +398,40 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
                 )
                 for target in decision.review_targets
             ]
+            # Indexes first, store second. The two writes cannot be made one
+            # transaction -- one is a DuckDB commit, the other is files on
+            # disk -- so a crash between them is possible whichever way round
+            # they go, and the ordering is a choice of *which* inconsistency
+            # to be left holding. They are not symmetric:
+            #
+            #   store first (what this used to do): the crash leaves a record
+            #   the store reports as written and no index knows about. It is
+            #   never a candidate again, so a later duplicate of it is
+            #   silently split -- a permanent recall gap, invisible, and
+            #   exactly what the "must not reopen a recall gap" note below
+            #   was written to prevent while the ordering quietly defeated it.
+            #
+            #   indexes first (this): the crash leaves a record in the index
+            #   that the store never got. `query_one` surfaces its id,
+            #   `get_records_by_ids` returns no row for it, and it drops out
+            #   of `candidates` -- the decision is the one that would have
+            #   been made had it never been indexed. A retry re-adds the same
+            #   id, which `candidate_ids` dedupes as a set.
+            #
+            # So the invariant is: the index may lead the store, never lag
+            # it. Pinned by
+            # test_a_lookup_survives_an_index_entry_the_store_never_got.
+            #
+            # faiss.write_index re-serializes the whole graph on every call,
+            # so lookup latency grows with catalog size; a real scaling limit
+            # this pass doesn't solve. A torn write mid-save is still
+            # possible, and stays loud rather than silent: `load` refuses an
+            # artifact that does not match its manifest hash.
+            ann_index.add(new_record, record_id)
+            ann_index.save(Path(indexes_row.ann_root))
+            inverted_index.add(new_record, record_id)
+            inverted_index.save(Path(indexes_row.standard_root))
+
             written = store.apply_lookup(
                 conn,
                 run_id,
@@ -375,16 +443,6 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
                 n_review_candidates=decision.n_review_candidates,
                 n_auto_reject_candidates=decision.n_auto_reject_candidates,
             )
-
-            # Always re-save, in-memory and on disk, with the new record
-            # added -- a crash between requests must not silently reopen a
-            # recall gap on restart. faiss.write_index re-serializes the
-            # whole graph on every call, so lookup latency grows with
-            # catalog size; a real scaling limit this pass doesn't solve.
-            ann_index.add(new_record, record_id)
-            ann_index.save(Path(indexes_row.ann_root))
-            inverted_index.add(new_record, record_id)
-            inverted_index.save(Path(indexes_row.standard_root))
 
             cluster_row = store.get_cluster(conn, run_id, written.record.cluster_id)
             assert cluster_row is not None  # apply_lookup just wrote or grew it

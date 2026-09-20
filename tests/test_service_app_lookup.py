@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from dedup.model.calibrate import PlattCalibrator
 from dedup.model.threshold import CostModel
 from dedup.model.train import PairScorer, prepare, read_scorer_manifest, train_scorer
+from dedup.normalize import normalize
 from dedup.schema import Record
 from dedup.service import store
 from dedup.service.app import create_app
@@ -250,3 +251,53 @@ def test_lookup_against_an_unknown_run_is_404(lookup_app):
     client, _, _ = lookup_app
     resp = _lookup(client, "not-a-real-run", "Anything")
     assert resp.status_code == 404
+
+
+def test_a_lookup_survives_an_index_entry_the_store_never_got(lookup_app):
+    """The crash window the write ordering chooses to leave open.
+
+    A lookup persists two things that cannot be one transaction -- a DuckDB
+    commit and index files on disk -- so a crash between them leaves an
+    inconsistency either way. The route writes the indexes *first*, which
+    makes the surviving direction "the index knows a record the store does
+    not". This is that state, and it must be unremarkable: the ghost id is
+    surfaced by `query_one`, resolves to no row, and simply drops out of the
+    candidate set, leaving the decision the one that would have been made
+    had it never been indexed.
+
+    The reverse ordering fails silently instead, which is why it was
+    changed: a record in the store that no index knows is never a candidate
+    again, so a later duplicate of it is split with nothing to notice.
+    """
+    client, app, run_id = lookup_app
+
+    # A first lookup, to populate the route's per-run index cache.
+    assert _lookup(client, run_id, "Zephyr Gadget Model ZZ999Z").status_code == 200
+
+    ghost = normalize(
+        Record(
+            record_id="ghost:1",
+            source="synthetic",
+            title="Panasonic Digital Widget Model XK100A",
+        )
+    )
+    app.state.ann_cache[run_id].add(ghost, "ghost:1")
+    app.state.inverted_cache[run_id].add(ghost, "ghost:1")
+    assert client.get(f"/runs/{run_id}/records/ghost:1").status_code == 404
+
+    # A record that blocking will surface the ghost against -- same code,
+    # same brand, so it lands in the ghost's block and its ann neighbourhood.
+    resp = _lookup(client, run_id, "Panasonic Digital Widget Model XK100A Version2")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # The ghost earns no credit and appears in nothing the route returns.
+    reviewed = {r["left_record"]["record_id"] for r in body["secondary_reviews"]}
+    reviewed |= {r["right_record"]["record_id"] for r in body["secondary_reviews"]}
+    assert "ghost:1" not in reviewed
+    members = client.get(
+        f"/runs/{run_id}/clusters/{body['cluster']['cluster_id']}"
+    ).json()["members"]
+    assert "ghost:1" not in {m["record_id"] for m in members}
+    # ...and the real Panasonic listings still decided the outcome.
+    assert body["decision"] in {"auto_merge", "review", "new_cluster"}

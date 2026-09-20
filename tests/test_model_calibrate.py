@@ -23,6 +23,7 @@ import pytest
 from dedup.eval.metrics import average_precision, precision_recall_curve
 from dedup.model import calibrate as calibrate_module
 from dedup.model.calibrate import (
+    BetaCalibrator,
     PlattCalibrator,
     brier_score,
     expected_calibration_error,
@@ -291,3 +292,78 @@ def test_empty_input_does_not_divide_by_zero():
     empty = np.empty(0)
     assert brier_score(empty, empty.astype(bool)) == 0.0
     assert expected_calibration_error(empty, empty.astype(bool)) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Beta calibration -- the third option, added because neither Platt nor
+# isotonic keeps both calibration and resolution
+
+
+def _skewed(n=4000, seed=0):
+    """Scores whose true probability is s**3 -- a shape a two-parameter
+    sigmoid provably cannot fit, which is the case beta calibration exists
+    for."""
+    rng = np.random.default_rng(seed)
+    scores = rng.random(n)
+    labels = rng.random(n) < scores**3
+    return scores, labels
+
+
+def test_beta_calibration_never_reorders_pairs():
+    """The same invariant `PlattCalibrator`'s positive-slope check enforces:
+    a calibrator that reordered pairs would change PR-AUC."""
+    scores, labels = _skewed()
+    calibrated = BetaCalibrator().fit(scores, labels).transform(np.linspace(0.0, 1.0, 1000))
+    assert np.all(np.diff(calibrated) >= -1e-12)
+
+
+def test_beta_calibration_keeps_resolution_where_the_cost_model_reads():
+    """Isotonic's failure mode, which this must not reproduce: collapsing the
+    top of the range to a handful of levels means `p_hi` cannot separate
+    anything inside one atom."""
+    scores, labels = _skewed()
+    calibrated = BetaCalibrator().fit(scores, labels).transform(scores)
+    high = calibrated[calibrated >= 0.9]
+    assert len(np.unique(high)) > 100
+
+
+def test_beta_calibration_fits_a_shape_platt_cannot():
+    """On an s**3 relationship the sigmoid is misspecified at both ends. Beta
+    has the shape parameters to follow it, and should be the better calibrated
+    of the two -- if it ever is not, it is not earning its place."""
+    scores, labels = _skewed()
+    beta = BetaCalibrator().fit(scores, labels).transform(scores)
+    platt = PlattCalibrator().fit(scores, labels).transform(scores)
+    truth = scores**3
+    assert np.abs(beta - truth).mean() < np.abs(platt - truth).mean()
+
+
+def test_beta_calibration_refuses_a_non_monotone_fit():
+    """Reversed labels make the map fall with the score. Refused rather than
+    returned, exactly as a non-positive Platt slope is."""
+    scores = np.linspace(0.01, 0.99, 500)
+    labels = scores < 0.5  # high score, low probability
+    with pytest.raises(ValueError, match="non-monotone|reorder"):
+        BetaCalibrator().fit(scores, labels)
+
+
+def test_beta_calibration_survives_scores_at_the_bounds():
+    """A booster legitimately returns exact 0.0 and 1.0, and log(0) is -inf."""
+    scores, labels = _skewed()
+    scores[:10] = 0.0
+    scores[10:20] = 1.0
+    labels[:10] = False
+    labels[10:20] = True
+    out = BetaCalibrator().fit(scores, labels).transform(np.array([0.0, 0.5, 1.0]))
+    assert np.all(np.isfinite(out))
+
+
+def test_beta_calibration_refuses_one_class():
+    scores = np.linspace(0.01, 0.99, 100)
+    with pytest.raises(ValueError, match="both classes"):
+        BetaCalibrator().fit(scores, np.ones_like(scores, dtype=bool))
+
+
+def test_beta_transform_before_fit_is_refused():
+    with pytest.raises(RuntimeError, match="before fit"):
+        BetaCalibrator().transform(np.array([0.5]))

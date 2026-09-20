@@ -38,10 +38,10 @@ classes in the opposite direction to how it was declared.
 
 | feature | kind | coverage | PR-AUC | pos mean | neg mean | sep | n+ |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `model_number_prefix_ratio` |  | 0.7422 | 0.6349 | 0.8414 | 0.0439 | +0.7975 | 266 |
 | `code_token_jaccard` |  | 0.7456 | 0.6274 | 0.6584 | 0.0032 | +0.6552 | 268 |
-| `model_number_prefix_ratio` |  | 0.6917 | 0.5784 | 0.8310 | 0.0431 | +0.7880 | 246 |
+| `model_number_exact` |  | 0.7422 | 0.5269 | 0.6842 | 0.0003 | +0.6839 | 266 |
 | `title_tfidf_cosine` |  | 1.0000 | 0.5222 | 0.6648 | 0.1153 | +0.5495 | 341 |
-| `model_number_exact` |  | 0.6917 | 0.4714 | 0.6707 | 0.0005 | +0.6703 | 246 |
 | `code_best_ratio` |  | 0.7456 | 0.4646 | 0.9610 | 0.2859 | +0.6751 | 268 |
 | `cross_title_desc_cosine_max` |  | 0.9494 | 0.4473 | 0.4246 | 0.0915 | +0.3331 | 338 |
 | `title_idf_overlap` |  | 1.0000 | 0.4318 | 0.4099 | 0.0716 | +0.3383 | 341 |
@@ -64,7 +64,7 @@ classes in the opposite direction to how it was declared.
 | `title_len_ratio` |  | 1.0000 | 0.0195 | 0.7478 | 0.7416 | +0.0062 | 341 |
 | `desc_any_present` | indicator | 1.0000 | 0.0189 | 0.9912 | 0.9486 | +0.0426 | 341 |
 | `code_tokens_both_present` | indicator | 1.0000 | 0.0189 | 0.7859 | 0.7448 | +0.0411 | 341 |
-| `model_number_both_present` | indicator | 1.0000 | 0.0187 | 0.7214 | 0.6912 | +0.0302 | 341 |
+| `model_number_both_present` | indicator | 1.0000 | 0.0188 | 0.7801 | 0.7415 | +0.0386 | 341 |
 | `brand_both_present` | indicator | 1.0000 | 0.0177 | 0.0235 | 0.2434 | -0.2200 | 341 |
 | `price_both_present` | indicator | 1.0000 | 0.0176 | 0.1818 | 0.2151 | -0.0333 | 341 |
 | `price_neither_present` | indicator | 1.0000 | 0.0175 | 0.2727 | 0.3099 | -0.0372 | 341 |
@@ -111,6 +111,7 @@ brand mismatch.
 
 ## Near-duplicate columns
 
+- `model_number_both_present` / `code_tokens_both_present` — r = +0.962
 - `digit_token_jaccard` / `digit_token_shared_count` — r = +0.959
 - `title_token_jaccard` / `title_idf_overlap` — r = +0.953
 

@@ -133,6 +133,57 @@ def test_the_cli_seeds_from_the_train_split_and_writes_a_loadable_catalog(tmp_pa
     assert json.loads((out / MANIFEST_FILE).read_text(encoding="utf-8"))["config"]["seed"] == 0
 
 
+def test_report_only_renders_against_the_catalog_on_disk_without_rewriting_it(tmp_path):
+    """The committed catalogs are fixed artifacts, and the CLI has to be able to
+    re-render a report without touching them.
+
+    Why it exists: `normalize.py` has moved since `synth-20k` and `synth-200k`
+    were written, and `families.base_product` picks a seed family's base
+    listing by `model_number_key` -- 6 of Abt-Buy's 755 train families now
+    choose a different one. So re-running the generator writes a *different*
+    catalog rather than reproducing the committed one, and a realism report
+    printing the generating command would tell a reader to overwrite exactly
+    what the report measures.
+    """
+    out = tmp_path / "catalog"
+    report = tmp_path / "realism.md"
+    assert main(["--root", str(FIXTURES), "--records", "40", "--out", str(out)]) == 0
+
+    before = (out / "records.jsonl").read_bytes()
+    manifest_before = read_manifest(out)
+
+    assert main([
+        "--root", str(FIXTURES), "--out", str(out), "--report", str(report), "--report-only",
+    ]) == 0
+
+    assert (out / "records.jsonl").read_bytes() == before
+    assert read_manifest(out) == manifest_before
+    text = report.read_text(encoding="utf-8")
+    assert "--report-only" in text
+    assert "is **not** rewritten by that command" in text
+
+
+def test_report_only_refuses_the_arguments_that_would_mean_generating(tmp_path):
+    out = tmp_path / "catalog"
+    assert main(["--root", str(FIXTURES), "--records", "40", "--out", str(out)]) == 0
+
+    # --report-only with nothing to write the report to is a no-op request.
+    with pytest.raises(SystemExit):
+        main(["--root", str(FIXTURES), "--out", str(out), "--report-only"])
+
+    # --records asks for generation, which is the thing --report-only declines.
+    with pytest.raises(SystemExit):
+        main([
+            "--root", str(FIXTURES), "--records", "40", "--out", str(out),
+            "--report", str(tmp_path / "r.md"), "--report-only",
+        ])
+
+
+def test_generating_still_requires_a_record_count(tmp_path):
+    with pytest.raises(SystemExit):
+        main(["--root", str(FIXTURES), "--out", str(tmp_path / "catalog")])
+
+
 @pytest.mark.skipif(
     not (REAL_ABT_BUY.is_dir() and SYNTH_20K.is_dir()),
     reason="Abt-Buy or the synth-20k catalog is not present; see CLAUDE.md > Data / Commands",

@@ -14,19 +14,19 @@ are optimistic as an estimate of what these settings would do on an unseen one. 
 Regenerate with:
 
 ```bash
-python -m dedup.blocking.evaluate --dataset abt-buy --out reports/blocking.md
+python -m dedup.blocking.evaluate --dataset abt-buy --leave-one-out --out reports/blocking.md
 ```
 
 ## The table
 
 | blocker | params | candidates | PC | RR | build s | query s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| standard (model number) | key=model_number_key, max_block=100 | 628 | 0.5349 | 0.9997 | 0.0 | 0.0 |
+| standard (model number) | key=model_number_key, max_block=100 | 672 | 0.5832 | 0.9997 | 0.0 | 0.0 |
 | standard (code tokens) | key=code-shaped title tokens, max_block=100 | 2,072 | 0.6708 | 0.9991 | 0.0 | 0.0 |
 | standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 29,555 | 0.8694 | 0.9875 | 0.1 | 0.1 |
 | sorted_neighborhood | w=20 | 41,097 | 0.6190 | 0.9826 | 0.0 | 0.0 |
 | lsh (minhash) | 128p, t=0.4, token | 27,828 | 0.5894 | 0.9882 | 0.7 | 0.1 |
-| ann (faiss HNSW) | M=32, ef=100, k=10 | 14,603 | 0.9562 | 0.9938 | 3.6 | 2.8 |
+| ann (faiss HNSW) | M=32, ef=100, k=10 | 14,603 | 0.9562 | 0.9938 | 2.7 | 2.4 |
 | union (all) | — | 84,117 | 0.9928 | 0.9644 | — | — |
 
 **PC** is pair completeness — true pairs surviving, divided by all 1,118 ground-truth pairs (never by the survivors).
@@ -35,6 +35,24 @@ python -m dedup.blocking.evaluate --dataset abt-buy --out reports/blocking.md
 There is deliberately no precision, F1 or accuracy column. A blocker's output is
 overwhelmingly non-duplicates by construction; discarding non-duplicates is the job,
 not an error.
+
+### What each blocker adds that the others do not
+
+Leave-one-out against the union above: drop one blocker, re-union the rest, and report
+the difference. A blocker's standalone row in the table cannot show this — two blockers
+can each reach high completeness on exactly the same pairs.
+
+| blocker | marginal candidates | marginal PC |
+| --- | ---: | ---: |
+| `standard (model number)` | +0 | +0.0000 |
+| `standard (code tokens)` | +737 | +0.0000 |
+| `standard (rare tokens)` | +15,244 | +0.0089 |
+| `sorted_neighborhood` | +28,474 | +0.0045 |
+| `lsh (minhash)` | +18,317 | +0.0000 |
+| `ann (faiss HNSW)` | +2,345 | +0.0215 |
+
+`standard (model number)`, `standard (code tokens)`, `lsh (minhash)` add no completeness the other blockers do not already have on this catalog. None is deleted: a negative result someone can re-run is evidence, the same claim asserted from a deleted experiment is not, and the verdict is catalog-specific — it has already differed between Abt-Buy and `synth-20k`.
+
 
 ### Ceiling caveats
 

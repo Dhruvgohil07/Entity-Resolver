@@ -202,6 +202,64 @@ def test_spec_token_is_not_taken_as_a_model_number():
         assert normalize(record).model_number is None, title
 
 
+def test_a_code_with_a_separator_the_shape_gate_rejected_is_still_extracted():
+    # The regression this pins: the shape gate used to test the raw token
+    # against ^[A-Za-z0-9-]+$, which rejects "/". On this real Abt-Buy title
+    # the trailing, correct code failed that gate, extraction fell through to
+    # the *leading* convention, and the record was keyed under a different
+    # listing's code -- producing the only cluster fusion in the pipeline
+    # that survived both cost-based clusterers, plus a false negative on the
+    # same record's true partner. Gating on code_key(token) is the fix: the
+    # gate and the key it feeds now agree about what a code is.
+    record = Record(
+        record_id="abt_buy:30",
+        source="abt_buy",
+        title="Samsung YP-S2ZW 1GB Flash MP3 Player - YP-S2ZG/XAA",
+    )
+    normalized = normalize(record)
+    assert normalized.model_number == "YP-S2ZG/XAA"
+    assert normalized.model_number_key == "yps2zgxaa"
+
+
+def test_the_shape_gate_and_code_key_agree_on_every_separator_code_key_strips():
+    # Not just "/": code_key discards everything outside [a-z0-9], so any
+    # separator a vendor prints inside a code must reach the same verdict.
+    for title, expected in (
+        ("Apple iPod Shuffle 1GB MP3 Player - MB226LL/A", "MB226LL/A"),
+        ("TOMTOM GPS Receiver Accessory Kit - 9N00.101", "9N00.101"),
+        ("Hoover Wide Path Bag Up Vac - #U5140900", "#U5140900"),
+        ("Canon Deluxe Soft Case - 2595B002(AA)", "2595B002(AA)"),
+    ):
+        record = Record(record_id="abt_buy:31", source="abt_buy", title=title)
+        assert normalize(record).model_number == expected, title
+
+
+def test_a_spec_wearing_a_separator_is_still_rejected():
+    # The other half of gating on the key: a separator must not smuggle a
+    # spec *past* the check either. "18-200MM" and "1.5TB" both reduce to
+    # the digits-then-unit form the spec list is written against, which the
+    # raw-token gate never saw because of the "-" and the ".".
+    for title in (
+        "Nikon Zoom Lens - 18-200MM",
+        "Western Digital External Drive - 1.5TB",
+        "SONY PS2 8 MB Memory Card - 2-pk",
+    ):
+        record = Record(record_id="abt_buy:32", source="abt_buy", title=title)
+        assert normalize(record).model_number is None, title
+
+
+def test_a_short_code_is_measured_as_the_source_wrote_it():
+    # The 4-character floor stays on the token as printed, not on its key:
+    # "XM-6" and "GR-4" are real vendor codes whose keys ("xm6", "gr4") are
+    # three characters. Moving the floor onto the key silently dropped them.
+    for title, expected in (
+        ("Audiovox XM6 Outdoor Home Antenna - XM-6", "XM-6"),
+        ("Cuisinart GR-4 Griddler Four Multifunctional Cooking Options", "GR-4"),
+    ):
+        record = Record(record_id="abt_buy:33", source="abt_buy", title=title)
+        assert normalize(record).model_number == expected, title
+
+
 def test_vendor_codes_colliding_with_unit_suffixes_still_qualify():
     # "wh" and "a" are deliberately absent from the spec-suffix list: 161WH
     # and 8500A are real vendor codes, not watt-hours and amps.
@@ -221,7 +279,7 @@ def test_the_same_code_in_two_house_styles_shares_one_key():
     # KX-TS208W, and it is the same Panasonic phone. As printed vendor codes
     # both are correct, so model_number keeps them apart; as blocking keys
     # they must agree, and an exact model_number blocker reaches pair
-    # completeness 0.3354 against 0.5349 for this form.
+    # completeness 0.3336 against 0.5832 for this form.
     abt = Record(record_id="abt_buy:abt:1", source="abt_buy", title="Panasonic Phone - KXTS208W")
     buy = Record(record_id="abt_buy:buy:1", source="abt_buy", title="Panasonic KX-TS208W Corded")
 

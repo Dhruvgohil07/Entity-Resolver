@@ -22,7 +22,9 @@ from dedup.features.vectorize import PairFeaturizer
 from dedup.model.calibrate import PlattCalibrator
 from dedup.model.train import (
     DEFAULT_PARAMS,
+    MONOTONE_INCREASING_FEATURES,
     PairScorer,
+    monotone_constraints,
     prepare,
     read_scorer_manifest,
     train_scorer,
@@ -262,3 +264,65 @@ def test_a_manifest_disagreeing_about_the_calibrator_is_refused(scorer, tmp_path
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="has_calibrator"):
         PairScorer.load(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Monotone constraints -- what the booster is not allowed to learn
+
+
+def test_the_constraint_vector_is_positional_over_the_real_registry():
+    specs = PairFeaturizer().specs
+    constraints = monotone_constraints(specs)
+    assert len(constraints) == len(specs)
+    assert {spec.name for spec, c in zip(specs, constraints, strict=True) if c == 1} == (
+        MONOTONE_INCREASING_FEATURES
+    )
+    assert set(constraints) <= {0, 1}
+
+
+def test_the_semantic_layout_gets_its_own_vector():
+    # `include_semantic` adds a column, so a constraint vector written down
+    # as a literal would be the wrong length for one of the two shapes.
+    plain = PairFeaturizer().specs
+    semantic = PairFeaturizer(include_semantic=True).specs
+    assert len(semantic) == len(plain) + 1
+    assert len(monotone_constraints(semantic)) == len(semantic)
+
+
+def test_a_constraint_naming_a_column_the_registry_lost_is_refused(monkeypatch):
+    # The silent-drift guard: renaming a feature must break loudly here
+    # rather than quietly constraining nothing.
+    monkeypatch.setattr(
+        "dedup.model.train.MONOTONE_INCREASING_FEATURES",
+        frozenset({"code_token_jaccard", "title_tfidf_cosine_v2"}),
+    )
+    with pytest.raises(ValueError, match="title_tfidf_cosine_v2"):
+        monotone_constraints(PairFeaturizer().specs)
+
+
+def test_a_length_ratio_is_never_constrained():
+    # `desc_len_ratio` measurably points *backwards* on Abt-Buy (0.2213 on
+    # true pairs against 0.4763 on false) under the deduplication framing,
+    # and `title_len_ratio` is the same shape of column. Constraining either
+    # would cost accuracy to buy nothing.
+    assert "desc_len_ratio" not in MONOTONE_INCREASING_FEATURES
+    assert "title_len_ratio" not in MONOTONE_INCREASING_FEATURES
+
+
+def test_more_code_agreement_can_never_lower_a_pairs_score(split):
+    """The property itself, on a fitted booster: sweep a constrained column
+    upward with every other column held still, and the raw score must never
+    fall. This is what forbids the region the `synth-20k` error analysis
+    found -- 44 top-ranked pairs that are all wrong while scoring *below*
+    the candidate mean on every similarity column."""
+    scorer = train_scorer(split)
+    names = [spec.name for spec in scorer.featurizer.specs]
+    matrix = scorer.featurizer.transform(split.records, split.pair_keys)
+    base = matrix.values[0].copy()
+
+    for column in ("code_token_jaccard", "model_number_exact", "title_tfidf_cosine"):
+        index = names.index(column)
+        sweep = np.repeat(base[None, :], 21, axis=0)
+        sweep[:, index] = np.linspace(0.0, 1.0, 21)
+        scores = scorer.booster.predict_proba(sweep)[:, 1]
+        assert np.all(np.diff(scores) >= -1e-12), column

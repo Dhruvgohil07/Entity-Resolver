@@ -6,7 +6,7 @@ Every case below is a failure mode recorded in CLAUDE.md against real Abt-Buy
 rows, not an invented string:
 
   * `KXTS208W` / `KX-TS208W` -- one Panasonic phone, two vendor spellings.
-    Worth pair completeness 0.3354 -> 0.5349 in blocking; the same separator
+    Worth pair completeness 0.3336 -> 0.5832 in blocking; the same separator
     problem would silently halve this column.
   * `WH-1000XM4` / `WH-1000XM5` -- one character apart and genuinely different
     products. The near-miss column must score them high while the exact column
