@@ -15,13 +15,13 @@ python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --an
 
 | blocker | params | candidates | PC | RR | build s | query s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| standard (model number) | key=model_number_key, max_block=100 | 221,068 | 0.5313 | 1.0000 | 0.1 | 0.9 |
-| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 193,611 | 0.6076 | 1.0000 | 1.9 | 0.9 |
-| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 309,409 | 0.4147 | 1.0000 | 1.3 | 1.1 |
-| sorted_neighborhood | w=20 | 3,148,376 | 0.1247 | 0.9998 | 0.1 | 1.7 |
-| lsh (minhash) | 128p, t=0.4, token, cap=500 | 13,667,938 | 0.4042 | 0.9990 | 47.1 | 67.0 |
-| ann (faiss HNSW) | M=32, ef=100, k=150, svd=128 | 17,634,460 | 0.5000 | 0.9987 | 40.3 | 21.7 |
-| union (all) | — | 27,153,676 | 0.8470 | 0.9980 | — | — |
+| standard (model number) | key=model_number_key, max_block=100 | 178,454 | 0.5438 | 1.0000 | 0.1 | 1.2 |
+| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 193,611 | 0.6076 | 1.0000 | 2.2 | 1.2 |
+| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 309,409 | 0.4147 | 1.0000 | 1.4 | 1.3 |
+| sorted_neighborhood | w=20 | 3,148,376 | 0.1247 | 0.9998 | 0.1 | 1.9 |
+| lsh (minhash) | 128p, t=0.4, token, cap=500 | 13,667,938 | 0.4042 | 0.9990 | 61.3 | 93.6 |
+| ann (faiss HNSW) | M=32, ef=100, k=150, svd=128 | 17,634,460 | 0.5000 | 0.9987 | 52.5 | 26.6 |
+| union (all) | — | 27,139,606 | 0.8469 | 0.9980 | — | — |
 
 **PC** is pair completeness — true pairs surviving, divided by all 181,045 ground-truth pairs (never by the survivors).
 **RR** is reduction ratio — the fraction of the 13,730,482,041 possible pairs discarded.
@@ -40,8 +40,8 @@ not an error.
 ## What this means
 
 **The union row is the only one the rest of the pipeline inherits.** Its pair
-completeness of **0.8470** is a hard ceiling on system recall: the
-27691 true pairs no blocker emitted are never scored by `features/`,
+completeness of **0.8469** is a hard ceiling on system recall: the
+27710 true pairs no blocker emitted are never scored by `features/`,
 never seen by `model/`, and never reach `cluster/`. No amount of model work
 recovers them.
 
@@ -51,7 +51,7 @@ and a blocker that raises the candidate count without lifting the union is pure 
 
 ## The pairs blocking missed
 
-27691 of 181,045 true pairs never became candidates. This
+27710 of 181,045 true pairs never became candidates. This
 set, not the count, is where the next blocker's design comes from:
 
 1. `30WLBK/XAC Omnimount Mount WLBK`
@@ -89,7 +89,7 @@ set, not the count, is where the next blocker's design comes from:
   neighbour count and document-frequency cutoff were swept over Abt-Buy and applied here
   unchanged, so these figures measure how those settings transfer, not what tuning on this
   catalog would reach.
-- **Which ceiling applies depends on what is being compared.** The 0.8470 above is the
+- **Which ceiling applies depends on what is being compared.** The 0.8469 above is the
   batch-deduplication number over the whole catalog. When `features/` and `model/` report
   test-split recall against the baseline's test-split F1, the ceiling that binds them is
   the test-split one, not this.

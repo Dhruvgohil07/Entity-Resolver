@@ -186,6 +186,14 @@ _TRAILING_PUNCT_RE = re.compile(r"[,./=]+$")
 # model, not 161 watt-hours) and so is "a" (HP Officejet 8500A/6500A).
 # Single-letter suffixes only matter above the 4-character floor anyway, so
 # "12V", "55W" and "4K" never reach this check.
+#
+# The spelled-out units are here for the same reason the abbreviations are,
+# and they are safe exactly where a short abbreviation is not: nothing sells a
+# vendor code reading "12-VOLT" or "7.1-CHANNEL", so unlike "wh" and "a" these
+# collide with no real code. They became reachable only once this check started
+# running per "/"-separated segment as well as over the whole key -- see
+# `_qualifies_as_model_number` -- because "MOUNT/12-VOLT" is not a spec *as a
+# whole* and passes a check that only ever reads the full token.
 _SPEC_UNIT_SUFFIXES = frozenset(
     {
         "w", "kw", "v", "ma", "mah", "ah",
@@ -196,11 +204,17 @@ _SPEC_UNIT_SUFFIXES = frozenset(
         "ml", "l", "qt", "gal",
         "p", "k", "fps", "dpi", "ppi", "rpm", "btu", "hp",
         "pk", "ct", "pc",
+        # Spelled out, where no vendor code competes for the word.
+        "volt", "volts", "watt", "watts", "channel", "channels",
+        "inch", "inches", "megapixel", "megapixels", "hertz",
+        "amp", "amps", "ohm", "ohms", "pack", "piece", "count",
     }
 )
 # No decimal branch: this is matched against `code_key`'s output, which has
 # already discarded the ".", so "1.5TB" arrives as "15tb" and is caught by the
-# digits-then-letters form like any other spec.
+# digits-then-letters form like any other spec. A decimal that is *not* a
+# unit spec ("802.11n", "2.7-Inch") needs the token as printed instead, and is
+# handled structurally in `_qualifies_as_model_number`.
 _SPEC_TOKEN_RE = re.compile(r"^\d+([A-Za-z]+)$")
 
 
@@ -242,13 +256,65 @@ def _qualifies_as_model_number(token: str) -> bool:
     the key drops real vendor codes whose key is shorter than four characters
     -- "XM-6", "GR-4" and "IP-3" all key to three -- which was measured on the
     real catalog, not reasoned about.
+
+    Judging the *key* alone was itself a defect, caught by review: `code_key`
+    strips the separators, and it is the separators that distinguish a code
+    from a measurement. With nothing but the stripped form to read, the gate
+    cannot tell "9N00.101" (a real Targus code) from "802.11n" (a WiFi
+    standard), and it admitted "f/3.5-5.6G" -- a lens aperture -- as a model
+    number. On Abt-Buy that gave the Nikon D60 kit (e00465) and the D90 kit
+    (e00883), two different products, the single shared key "f3556g", setting
+    `model_number_exact` and `model_number_prefix_ratio` to 1 for their pair;
+    both columns are monotone-constrained, so a false key there can only push
+    a score up. That is precisely the "a false model number fuses unrelated
+    products" cost `_SPEC_UNIT_SUFFIXES` above is written to avoid.
+
+    So the shape is judged on the key *and* on the printed token, each for
+    what only it can see. The three printed-form rules below were written
+    against the measured population rather than imagined: of the 90 Abt-Buy
+    extractions the older `^[A-Za-z0-9-]+$` gate rejected, 83 are genuine
+    vendor codes it was wrong to drop ("MB226LL/A", "EC-NV30ZSBA/US",
+    "2595B002(AA)", "#EL012A", "9N00.101") and 7 are specs or prose. Reverting
+    to that gate to kill the 7 would cost the 83, so these separate them
+    instead, and they are checked in both directions by test.
     """
     if not (4 <= len(token) <= 20):
         return False
     key = code_key(token)
     if not (any(c.isdigit() for c in key) and any(c.isalpha() for c in key)):
         return False
-    return not _is_spec_token(key)
+    if _is_spec_token(key):
+        return False
+
+    segments = token.split("/")
+
+    # (i) One character before a "/" is an English abbreviation, not a code
+    # stem: "f/3.5-5.6G" is an aperture, "w/PS2" and "w/Remote" are "with",
+    # "b/w" is black-and-white, "s/n" a serial number. Every real slash-code
+    # measured on Abt-Buy carries at least two, "CV/FO-10" being the shortest
+    # of the 83.
+    if len(code_key(segments[0])) < 2:
+        return False
+
+    for segment in segments:
+        # (ii) One spec segment condemns the whole token. "MOUNT/12-VOLT" and
+        # "1080p/60Hz" are not specs as a whole, so the check over `key` above
+        # passes them; read a segment at a time they are obvious.
+        if _is_spec_token(code_key(segment)):
+            return False
+        # (iii) A decimal is a measurement, not a code -- but only when the
+        # digits *start* it. Every dotted code on the real catalog carries a
+        # letter before its first "." ("9N00.101", "1EG0.052.00",
+        # "9UEA.017.00", "9S00.006"); every spec wearing a dot has pure digits
+        # there ("2.7-Inch", "10.1-Megapixel", "802.11n", "2.4GHz/5GHz", and
+        # the "3.5" inside "f/3.5-5.6G"). That asymmetry is what lets the two
+        # be told apart at all, since both survive `code_key`.
+        if "." in segment:
+            head = segment.split(".", 1)[0]
+            if not any(c.isalpha() for c in head):
+                return False
+
+    return True
 
 
 def _model_number_key(model_number: str | None) -> str | None:

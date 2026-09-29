@@ -46,21 +46,21 @@ otherwise. **Calibrated** marks the rows the corruption rates were tuned to matc
 | title token Jaccard, median | 0.400 | 0.429 | +0.029 | — |
 | title token Jaccard, p90 | 0.700 | 0.667 | -0.033 | — |
 | token-count ratio, mean | 0.723 | 0.776 | +0.053 | — |
-| code keys equal | 0.605 | 0.561 | -0.044 | ±0.05, within |
-| code on one listing only | 0.106 | 0.125 | +0.020 | ±0.05, within |
-| code on neither listing | 0.079 | 0.066 | -0.013 | ±0.05, within |
-| both print a code, and they differ | 0.211 | 0.247 | +0.036 | ±0.05, within |
+| code keys equal | 0.605 | 0.572 | -0.032 | ±0.05, within |
+| code on one listing only | 0.107 | 0.123 | +0.017 | ±0.05, within |
+| code on neither listing | 0.080 | 0.073 | -0.007 | ±0.05, within |
+| both print a code, and they differ | 0.208 | 0.231 | +0.023 | ±0.05, within |
 | price on both listings | 0.219 | 0.229 | +0.010 | — |
 | price gap, median | 0.176 | 0.164 | -0.013 | ±0.05, within |
 | price gap, p90 | 0.407 | 0.356 | -0.051 | — |
 | brand on both listings | 0.010 | 0.263 | +0.252 | — |
 | description empty (share of records) | 0.202 | 0.205 | +0.004 | — |
-| same-brand code within 2 edits (share of coded entities) | 0.552 | 0.508 | -0.043 | — |
+| same-brand code within 2 edits (share of coded entities) | 0.552 | 0.498 | -0.055 | — |
 
 ## Reading this honestly
 
 - **Every calibrated statistic is within ±0.05 of the seeds.** The widest gap is code keys equal
-  at -0.044. The corruption rates were tuned by hand until this held, against the seeds themselves
+  at -0.032. The corruption rates were tuned by hand until this held, against the seeds themselves
   — the seed dataset's train split — so it shows the generator can reproduce these statistics, not
   that its duplicates are right in every way that matters.
 - **The seeds are a train split, so their test split never reached this catalog.**
@@ -74,9 +74,8 @@ otherwise. **Calibrated** marks the rows the corruption rates were tuned to matc
 - **Listings of one product differ less in length than the seeds' do** (token-count ratio 0.776
   against 0.723). Corruption drops and borrows words per listing; it does not reproduce one source
   writing systematically longer titles than another.
-- **Sibling density matches the seeds** (0.508 against the seeds' 0.552), counted as a same-brand
-  code within two edits. That holds for the rate, not the shape: every synthetic sibling is
-  derived from one seed, where the seeds' siblings are independent products.
+- **Siblings are sparser than in the seeds** (0.498 against the seeds' 0.552). Far siblings dilute
+  the near ones, so a model scored here meets fewer hard negatives than the seeds hold.
 - **Entities are larger than any the seeds have.** The seeds' largest entity holds 3 records; here
   1,269 entities hold more, up to 8. That is deliberate — whether pricing unemitted pairs at p = 0
   under-merges large entities cannot be asked of pairs and triples — and the size distribution is

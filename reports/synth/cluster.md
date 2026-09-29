@@ -22,13 +22,13 @@ python -m dedup.cluster.evaluate --dataset synth-20k --out reports/synth/cluster
 
 | method | criterion | clusters | largest | fused | split entities | implied pairs | review | B³ P | B³ R | B³ F1 | pair P | pair R | E[cost] | cost |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| all singletons | no merges — the floor | 5,663 | 1 | 0 | 1523 | 0 | 4,251 | 1.0000 | 0.4487 | **0.6195** | 0.0000 | 0.0000 | 9,759.2 | 9,299 |
-| connected components | p ≥ 0.9500, `p_hi` | 3,650 | 13 | 31 | 889 | 481 | 629 | 0.9829 | 0.7502 | **0.8509** | 0.9143 | 0.5655 | 13,653.8 | 12,131 |
-| connected components | p ≥ 0.5000, `p_lo` — review band merged unreviewed | 3,236 | 24 | 62 | 739 | 2,772 | 0 | 0.9305 | 0.8041 | **0.8627** | 0.6017 | 0.6685 | 62,761.7 | 60,132 |
-| connected components | p ≥ 0.1857, best pairwise F1 | 2,909 | 30 | 127 | 638 | 5,242 | 0 | 0.8696 | 0.8376 | **0.8533** | 0.4525 | 0.7322 | 122,709.9 | 115,386 |
-| average linkage | mean merge gain > 0 — a lone pair at p > `p_hi` | 3,781 | 8 | 29 | 938 | 42 | 1,004 | 0.9929 | 0.7243 | **0.8376** | 0.9815 | 0.5041 | 8,055.7 | 7,252 |
-| correlation clustering | lowest expected cost found | 3,783 | 8 | 30 | 939 | 42 | 995 | 0.9928 | 0.7247 | **0.8378** | 0.9807 | 0.5051 | 8,047.2 | 7,303 |
-| connected components | true candidate edges — the ceiling | 2,602 | 8 | 0 | 61 | 251 | 453 | 1.0000 | 0.9876 | **0.9938** | 1.0000 | 0.9850 | 54,866.1 | 643 |
+| all singletons | no merges — the floor | 5,663 | 1 | 0 | 1523 | 0 | 4,310 | 1.0000 | 0.4487 | **0.6195** | 0.0000 | 0.0000 | 9,624.2 | 9,238 |
+| connected components | p ≥ 0.9500, `p_hi` | 3,619 | 14 | 31 | 869 | 512 | 639 | 0.9820 | 0.7548 | **0.8535** | 0.9040 | 0.5718 | 14,136.9 | 12,993 |
+| connected components | p ≥ 0.5000, `p_lo` — review band merged unreviewed | 3,213 | 24 | 68 | 718 | 2,619 | 0 | 0.9329 | 0.8108 | **0.8676** | 0.6200 | 0.6795 | 59,779.4 | 56,712 |
+| connected components | p ≥ 0.2552, best pairwise F1 | 3,029 | 33 | 99 | 654 | 4,079 | 0 | 0.9007 | 0.8318 | **0.8649** | 0.5152 | 0.7200 | 95,168.8 | 89,220 |
+| average linkage | mean merge gain > 0 — a lone pair at p > `p_hi` | 3,756 | 8 | 32 | 922 | 35 | 1,011 | 0.9924 | 0.7287 | **0.8404** | 0.9797 | 0.5112 | 7,808.9 | 7,279 |
+| correlation clustering | lowest expected cost found | 3,757 | 8 | 29 | 924 | 32 | 1,007 | 0.9926 | 0.7290 | **0.8406** | 0.9794 | 0.5117 | 7,802.0 | 7,295 |
+| connected components | true candidate edges — the ceiling | 2,602 | 8 | 0 | 61 | 251 | 452 | 1.0000 | 0.9876 | **0.9938** | 1.0000 | 0.9850 | 53,577.3 | 642 |
 
 - **fused**: clusters holding records of more than one entity. **split entities**: entities spread over more than one cluster.
 - **implied pairs**: merged pairs no edge at the row's criterion supports — what transitivity added. The cost-based rows are measured against edges at p ≥ `p_hi`, the pairs the bands auto-merge.
@@ -44,7 +44,7 @@ cost-based method did with the same records: **separated**, **separated, but spl
 **still fused**.
 
 **1. 2 records, 2 entities** — 1 edge at `p_hi`, 0 implied pairs; cross-entity edges scored
-0.9736. Average linkage: **still fused**; correlation clustering: **still fused**.
+0.9765. Average linkage: **still fused**; correlation clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
@@ -52,7 +52,7 @@ cost-based method did with the same records: **separated**, **separated, but spl
 | `synthetic:fc9a3c0683cda:e005` | Canon NB-5L Lithium Battery |
 
 **2. 6 records, 3 entities** — 7 edges at `p_hi`, 8 implied pairs; cross-entity edges scored
-0.9768, 0.9762, 0.9762, 0.9743. Average linkage: **still fused**; correlation clustering: **still
+0.9777, 0.9749, 0.9747, 0.9740. Average linkage: **still fused**; correlation clustering: **still
 fused**.
 
 | entity | title |
@@ -64,27 +64,17 @@ fused**.
 | `synthetic:f08acb65e3df5:e011` | Pioneer iBus Interface For iPod - CDI200 Your iPod |
 | `synthetic:f08acb65e3df5:e011` | Pioneer iBus Interface Cable iPod - CDI200 Connection For Your iPod |
 
-**3. 4 records, 4 entities** — 3 edges at `p_hi`, 3 implied pairs; cross-entity edges scored
-0.9772, 0.9703, 0.9616. Average linkage: **still fused**; correlation clustering: **still fused**.
-
-| entity | title |
-| --- | --- |
-| `synthetic:f45343b1b3d0d:e005` | Samsung 7.1-Channel Home Theater System - System Power |
-| `synthetic:f45343b1b3d0d:e008` | 7.1-Channel Blu-ray Home Theater sys - Full Playback Black Finish |
-| `synthetic:f45343b1b3d0d:e011` | Samsung 7.1-Channel Home System |
-| `synthetic:ff37f41901015:e011` | Onkyo Black 7.1-Channel Home Theater sys |
-
-**4. 2 records, 2 entities** — 1 edge at `p_hi`, 0 implied pairs; cross-entity edges scored
-0.9689. Average linkage: **still fused**; correlation clustering: **still fused**.
+**3. 2 records, 2 entities** — 1 edge at `p_hi`, 0 implied pairs; cross-entity edges scored
+0.9690. Average linkage: **still fused**; correlation clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
 | `synthetic:fe10e9fe3aeea:e004` | Klipsch PM20 Speakers - System-Specific Loudness Contour |
 | `synthetic:fe10e9fe3aeea:e006` | PM20 Computer Speakers |
 
-**5. 6 records, 4 entities** — 11 edges at `p_hi`, 4 implied pairs; cross-entity edges scored
-0.9787, 0.9721, 0.9704, 0.9666, 0.9604, 0.9554, 0.9510, 0.9501. Average linkage: **still fused**;
-correlation clustering: **still fused**.
+**4. 6 records, 4 entities** — 9 edges at `p_hi`, 6 implied pairs; cross-entity edges scored
+0.9802, 0.9760, 0.9706, 0.9681, 0.9662, 0.9640. Average linkage: **still fused**; correlation
+clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
@@ -95,9 +85,9 @@ correlation clustering: **still fused**.
 | `synthetic:f7c2e414b2efe:e011` | Oregon Scientific AT18 Waterproof Action Camcorder Oregon Scientific AT18 |
 | `synthetic:f7c2e414b2efe:e011` | Oregon Scientific AT18 Wearable Waterproof Action Camcorder Conditions Mounts |
 
-**6. 9 records, 3 entities** — 31 edges at `p_hi`, 5 implied pairs; cross-entity edges scored
-0.9822, 0.9821, 0.9821, 0.9820, 0.9820, 0.9818, 0.9818, 0.9817, 0.9816, 0.9815, 0.9812, 0.9797,
-0.9795, 0.9794, 0.9779, 0.9694, 0.9678, 0.9540. Average linkage: **still fused**; correlation
+**5. 9 records, 3 entities** — 31 edges at `p_hi`, 5 implied pairs; cross-entity edges scored
+0.9831, 0.9830, 0.9827, 0.9827, 0.9827, 0.9826, 0.9824, 0.9823, 0.9819, 0.9817, 0.9800, 0.9799,
+0.9798, 0.9791, 0.9769, 0.9681, 0.9587, 0.9540. Average linkage: **still fused**; correlation
 clustering: **still fused**.
 
 | entity | title |
@@ -112,8 +102,8 @@ clustering: **still fused**.
 | `synthetic:f1be761646246:e008` | Panasonic Pack 30 Minure DVD-RAM - LMAF30U3 Pack Single-Sided |
 | `synthetic:f1be761646246:e008` | Panasonic Three Pack Of 30 Discs - LMAF30U3 |
 
-**7. 3 records, 2 entities** — 3 edges at `p_hi`, 0 implied pairs; cross-entity edges scored
-0.9766, 0.9754. Average linkage: **still fused**; correlation clustering: **still fused**.
+**6. 3 records, 2 entities** — 3 edges at `p_hi`, 0 implied pairs; cross-entity edges scored
+0.9742, 0.9723. Average linkage: **still fused**; correlation clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
@@ -121,8 +111,8 @@ clustering: **still fused**.
 | `synthetic:f7fad4cfd6fe2:e000` | Black 5.8 GHz Cordless Phone sys - KXTG4500B System Frequency-Hopping Spread Spectrum |
 | `synthetic:f7fad4cfd6fe2:e006` | Panasonic Black GHz Phoine System - KXTG4500B Spectrum Technology |
 
-**8. 7 records, 3 entities** — 17 edges at `p_hi`, 4 implied pairs; cross-entity edges scored
-0.9817, 0.9803, 0.9702, 0.9682, 0.9676, 0.9644, 0.9508. Average linkage: **still fused**;
+**7. 7 records, 3 entities** — 17 edges at `p_hi`, 4 implied pairs; cross-entity edges scored
+0.9823, 0.9812, 0.9743, 0.9699, 0.9680, 0.9665, 0.9661. Average linkage: **still fused**;
 correlation clustering: **still fused**.
 
 | entity | title |
@@ -135,8 +125,8 @@ correlation clustering: **still fused**.
 | `synthetic:f94058cece539:e005` | LG LDF6920BB Fully Integrated Built In blk Dishwasher Motor |
 | `synthetic:f94058cece539:e008` | LG 12' LDF6920BB Fully Integrated Built In Blalck Dishwasher - LDF6920BB |
 
-**9. 4 records, 3 entities** — 3 edges at `p_hi`, 3 implied pairs; cross-entity edges scored
-0.9741, 0.9707. Average linkage: **still fused**; correlation clustering: **still fused**.
+**8. 4 records, 3 entities** — 3 edges at `p_hi`, 3 implied pairs; cross-entity edges scored
+0.9781, 0.9772. Average linkage: **still fused**; correlation clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
@@ -145,9 +135,9 @@ correlation clustering: **still fused**.
 | `synthetic:f09766bde4b60:e004` | LG LFC25770ST 25.0 Stainless Steel French Door Bottom fridge |
 | `synthetic:f09766bde4b60:e005` | LG LFC25770ST Cu. Ft. Stainless Steel French Door Bottom Freezer Ddawer Stainless |
 
-**10. 11 records, 6 entities** — 22 edges at `p_hi`, 33 implied pairs; cross-entity edges scored
-0.9783, 0.9773, 0.9769, 0.9750, 0.9740, 0.9730, 0.9728, 0.9684, 0.9681, 0.9678, 0.9675, 0.9655,
-0.9612, 0.9571. Average linkage: **still fused**; correlation clustering: **still fused**.
+**9. 11 records, 6 entities** — 23 edges at `p_hi`, 32 implied pairs; cross-entity edges scored
+0.9792, 0.9791, 0.9783, 0.9768, 0.9762, 0.9757, 0.9748, 0.9747, 0.9708, 0.9688, 0.9681, 0.9668,
+0.9645, 0.9572, 0.9506. Average linkage: **still fused**; correlation clustering: **still fused**.
 
 | entity | title |
 | --- | --- |
@@ -163,21 +153,34 @@ correlation clustering: **still fused**.
 | `synthetic:f7896de221773:e007` | D700 Digital SLR Digital Camera - Color Matrix |
 | `synthetic:f7896de221773:e010` | Nikon D700 Digital SLR dig - Live View Shooting |
 
+**10. 6 records, 5 entities** — 6 edges at `p_hi`, 9 implied pairs; cross-entity edges scored
+0.9738, 0.9713, 0.9712, 0.9697, 0.9690. Average linkage: **still fused**; correlation clustering:
+**still fused**.
+
+| entity | title |
+| --- | --- |
+| `synthetic:fc028fb3b0530:e002` | LG DLE3733W Whilte XL Capacity Electric Dryer |
+| `synthetic:fc028fb3b0530:e005` | LG DLE3733W wht XL Capacity Electric Dryer Panel |
+| `synthetic:fc028fb3b0530:e005` | DLE3733W XL Capacity Electric Dial-A-Cycle Drum Lgiht Transparent |
+| `synthetic:fc028fb3b0530:e007` | LG DLE3733W White XL Capacity Electric Dryer |
+| `synthetic:fc028fb3b0530:e009` | DLE3733W White XL Electric Dryer Dial-A-Cycle Drum Light |
+| `synthetic:fc028fb3b0530:e010` | DLE3733W XL Capacity Electric Dryer - Cntrol Panel |
+
 ## Reading this honestly
 
 - **B-cubed flatters doing nothing on this split.** Leaving every record a singleton scores B³ F1
   0.6195: precision is 1 by construction, and recall is 0.4487 because entities average 2.23
   records. Read every row against that floor rather than against zero — connected components at
-  `p_hi` is +0.2315 above it.
+  `p_hi` is +0.2341 above it.
 - **The threshold that maximizes pairwise F1 trades cluster precision for recall, and chaining is
-  why.** At p ≥ 0.1857, chosen on out-of-fold train predictions, connected components merges 5,242
-  pairs no edge supports, against 481 at `p_hi`. The largest cluster grows from 13 records to 30,
-  fused clusters from 31 to 127, and B³ precision falls from 0.9829 to 0.8696. B³ F1 still rises,
-  0.8509 to 0.8533, because recall gained more than precision lost — which is why no F1, pairwise
+  why.** At p ≥ 0.2552, chosen on out-of-fold train predictions, connected components merges 4,079
+  pairs no edge supports, against 512 at `p_hi`. The largest cluster grows from 14 records to 33,
+  fused clusters from 31 to 99, and B³ precision falls from 0.9820 to 0.9007. B³ F1 still rises,
+  0.8535 to 0.8649, because recall gained more than precision lost — which is why no F1, pairwise
   or B-cubed, should pick the threshold: the precision lost here is fused products.
 - **Chaining happens at `p_hi` as well: 31 of its clusters fuse more than one product.** Average
   linkage cleanly separates 2 of them and correlation clustering 2; separating them but splitting
-  an entity: average linkage 1, correlation clustering 1. Correlation clustering leaves 28 of the
+  an entity: average linkage 1, correlation clustering 2. Correlation clustering leaves 27 of the
   31 fused, and it keeps a record in a cluster only while no single move lowers expected cost
   under the model's own probabilities — so it is those probabilities holding them together, and
   the fix belongs to an `error-analyst` pass over `model/` and `features/`, not to this stage.
@@ -186,20 +189,20 @@ correlation clustering: **still fused**.
   Cluster recall can exceed blocking's pair completeness — an entity of three needs only two of
   its pairs emitted — but not by more than that.
 - **The objective and ground truth disagree on the winner.** Correlation clustering has the lowest
-  expected cost (8,047.2), but average linkage the lowest realized cost (7,252). The objective
+  expected cost (7,802.0), but average linkage the lowest realized cost (7,279). The objective
   reads the model's probabilities, so where the two disagree it is those probabilities that are
   wrong about some pairs.
 - **Under the model's probabilities the truth is not the cheapest partition.** The ceiling row
-  costs 54,866.1 in expectation against 8,047.2 for the best partition found, because merging a
+  costs 53,577.3 in expectation against 7,802.0 for the best partition found, because merging a
   true pair the model scores low is priced as a false merge. No search over this objective reaches
   the ceiling, however thorough; that gap is the scorer's to close.
 - **Review is a third outcome here too, and B-cubed does not see it.** Every pair a partition
   leaves apart falls back to its band — queued for review at p ≥ `p_lo`, rejected below — so a
   lone pair merges only where the bands would auto-merge it, and both cost columns bill on the
   same terms as `reports/synth/model.md`. The B-cubed figures score the partition before any
-  review is resolved: connected components at `p_hi` leaves 629 pairs queued, average linkage
-  1,004 pairs.
+  review is resolved: connected components at `p_hi` leaves 639 pairs queued, average linkage
+  1,011 pairs.
 - **Clustering lowers the bill, not only the entity count.** On those same terms the pairwise
-  bands alone — every pair decided on its own, producing no entities at all — bill 8,310; average
-  linkage bills 7,252.
+  bands alone — every pair decided on its own, producing no entities at all — bill 8,351; average
+  linkage bills 7,279.
 

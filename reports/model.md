@@ -31,10 +31,10 @@ them would mean nothing.
 
 | | Test F1 | Test P | Test R | PR-AUC | P@10 | P@100 | R-prec | Threshold | Oracle F1 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| model | **0.8813** | 0.8603 | 0.9032 | 0.9489 | 1.000 | 0.990 | 0.886 | 0.0093 | 0.8978 |
+| model | **0.8892** | 0.8958 | 0.8827 | 0.9472 | 1.000 | 0.990 | 0.891 | 0.0169 | 0.8978 |
 | baseline (TF-IDF) | 0.5204 | 0.4605 | 0.5982 | 0.4720 | 0.600 | 0.620 | 0.504 | 0.6243 | 0.5249 |
 
-F1 +0.3609 against the baseline. **Precision in these two rows is not measured
+F1 +0.3688 against the baseline. **Precision in these two rows is not measured
 on the same candidate set** — see "Reading this honestly". Each row's threshold is
 on its own scale: a cosine for the baseline, a calibrated probability for the model.
 
@@ -42,27 +42,27 @@ on its own scale: a cosine for the baseline, a calibrated probability for the mo
 
 What the system actually does. Not an F1: three populations and a bill.
 
-- **auto-merge** 271 pairs, 7 of them wrong (precision 0.9742, recall 0.7742 against all 341 true pairs in the split)
-- **review** 19 pairs (0.10% of candidates), 16 of them true
-- **auto-reject** 18,529 pairs, losing 61 true pairs outright
-- realized cost **281** review-equivalents
+- **auto-merge** 269 pairs, 7 of them wrong (precision 0.9740, recall 0.7683 against all 341 true pairs in the split)
+- **review** 22 pairs (0.12% of candidates), 18 of them true
+- **auto-reject** 18,528 pairs, losing 61 true pairs outright
+- realized cost **284** review-equivalents
 
 ### Sensitivity to the cost ratio
 
 | C_fm | C_fs | p_hi | p_lo | merge | bad | review | missed | auto-P | auto-R | cost |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 2 | 0.900 | 0.500 | 275 | 8 | 15 | 61 | 0.9709 | 0.7830 | 217 |
-| 20 | 2 | 0.950 | 0.500 | 271 | 7 | 19 | 61 | 0.9742 | 0.7742 | 281 |
-| 50 | 2 | 0.980 | 0.500 | 258 | 3 | 32 | 61 | 0.9884 | 0.7478 | 304 |
-| 50 | 5 | 0.980 | 0.200 | 258 | 3 | 45 | 53 | 0.9884 | 0.7478 | 460 |
-| 100 | 2 | 0.990 | 0.500 | 244 | 3 | 46 | 61 | 0.9877 | 0.7067 | 468 |
+| 10 | 2 | 0.900 | 0.500 | 278 | 7 | 13 | 61 | 0.9748 | 0.7947 | 205 |
+| 20 | 2 | 0.950 | 0.500 | 269 | 7 | 22 | 61 | 0.9740 | 0.7683 | 284 |
+| 50 | 2 | 0.980 | 0.500 | 259 | 6 | 32 | 61 | 0.9768 | 0.7419 | 454 |
+| 50 | 5 | 0.980 | 0.200 | 259 | 6 | 43 | 53 | 0.9768 | 0.7419 | 608 |
+| 100 | 2 | 0.990 | 0.500 | 237 | 3 | 54 | 61 | 0.9873 | 0.6862 | 476 |
 
 ## Calibration
 
 | scores | Brier | ECE | PR-AUC |
 | --- | ---: | ---: | ---: |
-| raw booster | 0.00310 | 0.00245 | 0.9489 |
-| Platt (out-of-fold) | 0.00346 | 0.00101 | 0.9489 |
+| raw booster | 0.00311 | 0.00249 | 0.9472 |
+| Platt (out-of-fold) | 0.00346 | 0.00087 | 0.9472 |
 
 PR-AUC is identical in both rows and must be: Platt is monotone, so it cannot
 reorder pairs. Calibration moves what the number *means*, never the ranking —
@@ -72,34 +72,34 @@ Reliability of the calibrated probabilities:
 
 | bin | predicted | observed | pairs | gap |
 | --- | ---: | ---: | ---: | ---: |
-| 0.00–0.07 | 0.0026 | 0.0026 | 18,505 | -0.0001 |
-| 0.07–0.13 | 0.0933 | 0.2000 | 5 | -0.1067 |
-| 0.13–0.20 | 0.1544 | 0.5000 | 6 | -0.3456 |
-| 0.20–0.27 | 0.2218 | 0.4286 | 7 | -0.2067 |
-| 0.33–0.40 | 0.3512 | 0.7500 | 4 | -0.3988 |
-| 0.40–0.47 | 0.4591 | 1.0000 | 1 | -0.5409 |
-| 0.47–0.53 | 0.4939 | 1.0000 | 2 | -0.5061 |
-| 0.53–0.60 | 0.5811 | 1.0000 | 2 | -0.4189 |
-| 0.60–0.67 | 0.6351 | 1.0000 | 2 | -0.3649 |
-| 0.73–0.80 | 0.7655 | 1.0000 | 3 | -0.2345 |
-| 0.80–0.87 | 0.8308 | 0.3333 | 3 | +0.4975 |
-| 0.87–0.93 | 0.8968 | 1.0000 | 6 | -0.1032 |
-| 0.93–1.00 | 0.9933 | 0.9707 | 273 | +0.0226 |
+| 0.00–0.07 | 0.0026 | 0.0026 | 18,507 | -0.0001 |
+| 0.07–0.13 | 0.1034 | 0.2857 | 7 | -0.1824 |
+| 0.13–0.20 | 0.1771 | 0.6667 | 3 | -0.4895 |
+| 0.20–0.27 | 0.2284 | 1.0000 | 3 | -0.7716 |
+| 0.27–0.33 | 0.3010 | 0.5000 | 6 | -0.1990 |
+| 0.33–0.40 | 0.3943 | 1.0000 | 1 | -0.6057 |
+| 0.40–0.47 | 0.4534 | 1.0000 | 1 | -0.5466 |
+| 0.47–0.53 | 0.5116 | 0.3333 | 3 | +0.1783 |
+| 0.67–0.73 | 0.7120 | 1.0000 | 2 | -0.2880 |
+| 0.73–0.80 | 0.7491 | 1.0000 | 3 | -0.2509 |
+| 0.80–0.87 | 0.8305 | 0.7500 | 4 | +0.0805 |
+| 0.87–0.93 | 0.9097 | 0.8000 | 5 | +0.1097 |
+| 0.93–1.00 | 0.9923 | 0.9745 | 274 | +0.0178 |
 
 ## Feature importance (LightGBM gain)
 
 | # | feature | gain |
 | ---: | --- | ---: |
-| 1 | `model_number_prefix_ratio` | 36,810 |
-| 2 | `title_tfidf_cosine` | 14,163 |
-| 3 | `cross_title_desc_cosine_max` | 12,288 |
-| 4 | `desc_len_ratio` | 5,152 |
-| 5 | `title_len_ratio` | 2,594 |
-| 6 | `cross_title_desc_cosine_min` | 2,443 |
-| 7 | `code_best_ratio` | 1,847 |
-| 8 | `model_number_both_present` | 1,845 |
-| 9 | `desc_token_jaccard` | 1,802 |
-| 10 | `code_token_jaccard` | 1,150 |
+| 1 | `model_number_prefix_ratio` | 36,729 |
+| 2 | `title_tfidf_cosine` | 14,472 |
+| 3 | `cross_title_desc_cosine_max` | 11,949 |
+| 4 | `desc_len_ratio` | 5,031 |
+| 5 | `title_len_ratio` | 2,495 |
+| 6 | `cross_title_desc_cosine_min` | 2,416 |
+| 7 | `model_number_both_present` | 2,007 |
+| 8 | `code_best_ratio` | 1,906 |
+| 9 | `desc_token_jaccard` | 1,819 |
+| 10 | `code_token_jaccard` | 1,201 |
 
 ## Reading this honestly
 
@@ -112,11 +112,11 @@ Reliability of the calibrated probabilities:
   1.0000 on test (0.9949 on train), so no test figure here is capped by the blocker — a property
   of this split, not a general result.
 - **The cost ratio is not validated by this dataset.** Across the sensitivity grid `C_fm` spans
-  10–100 and the review queue moves only from 15 to 46 pairs out of 18,819, because few pairs
+  10–100 and the review queue moves only from 13 to 54 pairs out of 18,819, because few pairs
   score anywhere near either threshold. The ratio is a recorded judgment call (CLAUDE.md), and it
   only becomes load-bearing once `synth/` populates the middle of the distribution.
 - **The auto-rejected true pairs are the real loss, and they are not a threshold problem.** 61
-  true pairs fall below `p_lo`, and 33 of them score below 0.01 — the model is confidently wrong,
+  true pairs fall below `p_lo`, and 34 of them score below 0.01 — the model is confidently wrong,
   not undecided. Blocking emitted every one of them. No threshold recovers a pair the classifier
   buried; that is an `error-analyst` question for the next stage, not a tuning knob.
 - **`desc_len_ratio` ranks #4 on gain, and that is expected.** CLAUDE.md records it pointing

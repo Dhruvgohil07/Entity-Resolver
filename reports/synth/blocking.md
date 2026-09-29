@@ -15,12 +15,12 @@ python -m dedup.blocking.evaluate --dataset synth-20k --leave-one-out --out repo
 
 | blocker | params | candidates | PC | RR | build s | query s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| standard (model number) | key=model_number_key, max_block=100 | 21,212 | 0.5613 | 0.9999 | 0.0 | 0.1 |
-| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 51,864 | 0.6506 | 0.9997 | 0.2 | 0.2 |
-| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 130,552 | 0.6094 | 0.9993 | 0.2 | 0.3 |
-| sorted_neighborhood | w=20 | 357,561 | 0.3110 | 0.9980 | 0.0 | 0.2 |
-| lsh (minhash) | 128p, t=0.4, token | 1,382,151 | 0.6047 | 0.9922 | 6.5 | 3.0 |
-| ann (faiss HNSW) | M=32, ef=100, k=10 | 141,178 | 0.7705 | 0.9992 | 63.8 | 49.9 |
+| standard (model number) | key=model_number_key, max_block=100 | 19,844 | 0.5724 | 0.9999 | 0.0 | 0.2 |
+| standard (code tokens) | key=code-shaped title tokens, max_block=100 | 51,864 | 0.6506 | 0.9997 | 0.3 | 0.2 |
+| standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 130,552 | 0.6094 | 0.9993 | 0.2 | 0.4 |
+| sorted_neighborhood | w=20 | 357,561 | 0.3110 | 0.9980 | 0.0 | 0.1 |
+| lsh (minhash) | 128p, t=0.4, token | 1,382,151 | 0.6047 | 0.9922 | 10.4 | 4.7 |
+| ann (faiss HNSW) | M=32, ef=100, k=10 | 141,178 | 0.7705 | 0.9992 | 85.9 | 59.1 |
 | union (all) | — | 1,758,253 | 0.9238 | 0.9901 | — | — |
 
 **PC** is pair completeness — true pairs surviving, divided by all 21,284 ground-truth pairs (never by the survivors).
@@ -39,7 +39,7 @@ can each reach high completeness on exactly the same pairs.
 | blocker | marginal candidates | marginal PC |
 | --- | ---: | ---: |
 | `standard (model number)` | +0 | +0.0000 |
-| `standard (code tokens)` | +7,146 | +0.0026 |
+| `standard (code tokens)` | +7,741 | +0.0022 |
 | `standard (rare tokens)` | +46,051 | +0.0157 |
 | `sorted_neighborhood` | +257,234 | +0.0147 |
 | `lsh (minhash)` | +1,233,795 | +0.0343 |

@@ -39,8 +39,8 @@ classes in the opposite direction to how it was declared.
 | feature | kind | coverage | PR-AUC | pos mean | neg mean | sep | n+ |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `code_token_jaccard` |  | 0.7759 | 0.5532 | 0.7293 | 0.0222 | +0.7071 | 5134 |
-| `model_number_prefix_ratio` |  | 0.7529 | 0.3704 | 0.8116 | 0.1352 | +0.6763 | 5008 |
-| `model_number_exact` |  | 0.7529 | 0.3216 | 0.7015 | 0.0125 | +0.6890 | 5008 |
+| `model_number_prefix_ratio` |  | 0.7479 | 0.4140 | 0.8333 | 0.1366 | +0.6967 | 4993 |
+| `model_number_exact` |  | 0.7479 | 0.3618 | 0.7198 | 0.0101 | +0.7097 | 4993 |
 | `title_tfidf_cosine` |  | 1.0000 | 0.2788 | 0.6564 | 0.2074 | +0.4490 | 5976 |
 | `code_token_shared_count` |  | 1.0000 | 0.1945 | 0.8148 | 0.0474 | +0.7674 | 5976 |
 | `title_idf_overlap` |  | 1.0000 | 0.1884 | 0.4200 | 0.1438 | +0.2762 | 5976 |
@@ -59,7 +59,7 @@ classes in the opposite direction to how it was declared.
 | `digit_token_shared_count` |  | 1.0000 | 0.0281 | 0.1446 | 0.0336 | +0.1109 | 5976 |
 | `desc_len_ratio` |  | 0.6326 | 0.0234 | 0.5275 | 0.4738 | +0.0537 | 3735 |
 | `title_len_ratio` |  | 1.0000 | 0.0215 | 0.7663 | 0.7417 | +0.0246 | 5976 |
-| `model_number_both_present` | indicator | 1.0000 | 0.0214 | 0.8380 | 0.7511 | +0.0870 | 5976 |
+| `model_number_both_present` | indicator | 1.0000 | 0.0214 | 0.8355 | 0.7461 | +0.0894 | 5976 |
 | `code_tokens_both_present` | indicator | 1.0000 | 0.0213 | 0.8591 | 0.7741 | +0.0850 | 5976 |
 | `price_neither_present` | indicator | 1.0000 | 0.0209 | 0.4287 | 0.3651 | +0.0636 | 5976 |
 | `price_both_present` | indicator | 1.0000 | 0.0205 | 0.2271 | 0.1860 | +0.0411 | 5976 |

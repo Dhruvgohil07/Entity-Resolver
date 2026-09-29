@@ -327,15 +327,17 @@ def test_components_at_p_hi_matches_the_committed_report(report):
     existed, with scipy and a B-cubed written inline, and two independent
     implementations agreeing is what made them worth quoting. That
     corroboration does not transfer across a change to what the model scores.
-    Fixing `_qualifies_as_model_number` to gate on `code_key` moved extraction
-    on 95 of 2173 Abt-Buy records, which moves every probability downstream,
-    so the numbers below are the current pipeline's and are pinned only
-    against itself; the independent cross-check stands in git history against
-    the extraction of its day.
+    Two changes to `_qualifies_as_model_number` have moved extraction since --
+    gating the shape on `code_key` (95 of 2173 Abt-Buy records), then teaching
+    it to read the printed token again so an aperture stops being a code (8
+    more) -- and each moves every probability downstream, so the numbers below
+    are the current pipeline's and are pinned only against itself; the
+    independent cross-check stands in git history against the extraction of
+    its day.
     """
     hi = report.row(COMPONENTS_HI)
     assert hi.bcubed.precision == pytest.approx(0.9877, abs=5e-5)
-    assert hi.bcubed.recall == pytest.approx(0.8921, abs=5e-5)
+    assert hi.bcubed.recall == pytest.approx(0.8891, abs=5e-5)
     assert hi.errors.n_fused_clusters == 3
     assert hi.n_implied_pairs == 16
     assert len(report.fused) == 3
@@ -354,12 +356,12 @@ def test_every_row_scores_every_record_and_every_true_pair(report):
 def test_merging_nothing_bills_exactly_what_the_bands_route(report):
     """The cross-stage check that the two reports bill on one set of terms.
 
-    With no merges, every pair `reports/model.md` sends to auto-merge (271) or review
-    (19) is queued, and its 61 auto-rejected true pairs are the only misses.
+    With no merges, every pair `reports/model.md` sends to auto-merge (269) or review
+    (22) is queued, and its 61 auto-rejected true pairs are the only misses.
     """
     floor = report.row(SINGLETONS)
-    assert floor.n_review == 271 + 19
-    assert floor.realized_cost == 290 * 1 + 61 * 2
+    assert floor.n_review == 269 + 22
+    assert floor.realized_cost == 291 * 1 + 61 * 2
 
 
 @needs_data
@@ -410,8 +412,8 @@ def test_the_chaining_section_names_every_fused_cluster(report):
 
 @needs_data
 def test_the_bands_alone_bill_what_reports_model_md_bills(report):
-    """7 false merges at 20, 19 reviews, 61 misses at 2 -- nothing lost to blocking on test."""
-    assert report.band_realized_cost == 7 * 20 + 19 * 1 + 61 * 2
+    """7 false merges at 20, 22 reviews, 61 misses at 2 -- nothing lost to blocking on test."""
+    assert report.band_realized_cost == 7 * 20 + 22 * 1 + 61 * 2
 
 
 @needs_data

@@ -221,9 +221,15 @@ def test_a_code_with_a_separator_the_shape_gate_rejected_is_still_extracted():
     assert normalized.model_number_key == "yps2zgxaa"
 
 
-def test_the_shape_gate_and_code_key_agree_on_every_separator_code_key_strips():
+def test_a_code_wearing_any_separator_code_key_strips_is_still_extracted():
     # Not just "/": code_key discards everything outside [a-z0-9], so any
-    # separator a vendor prints inside a code must reach the same verdict.
+    # separator a vendor prints inside a code must still reach the gate.
+    #
+    # Named for the direction it actually pins. An earlier name claimed the
+    # gate and code_key "agree on every separator", which is deliberately no
+    # longer true in general -- the gate reads the printed token as well as
+    # the key, because the key cannot tell "9N00.101" from "802.11n". See
+    # test_a_decimal_measurement_is_not_a_code_but_a_dotted_code_is.
     for title, expected in (
         ("Apple iPod Shuffle 1GB MP3 Player - MB226LL/A", "MB226LL/A"),
         ("TOMTOM GPS Receiver Accessory Kit - 9N00.101", "9N00.101"),
@@ -246,6 +252,82 @@ def test_a_spec_wearing_a_separator_is_still_rejected():
     ):
         record = Record(record_id="abt_buy:32", source="abt_buy", title=title)
         assert normalize(record).model_number is None, title
+
+
+def test_an_aperture_is_not_a_model_number_and_does_not_fuse_two_camera_kits():
+    # The regression this pins, found by review on the real catalog. Gating
+    # the shape on code_key alone let "f/3.5-5.6G" -- a lens aperture -- pass,
+    # because stripping the punctuation leaves "f3556g", which carries a
+    # letter and a digit and is not <digits><unit>. Both of these are real
+    # Abt-Buy titles for *different* products (entities e00465 and e00883),
+    # and both extracted the same code, giving their pair the single shared
+    # key "f3556g" and setting model_number_exact and
+    # model_number_prefix_ratio to 1. Both columns are monotone-constrained,
+    # so a false key there can only push the pair's score up.
+    d60 = Record(
+        record_id="abt_buy:abt:34",
+        source="abt_buy",
+        title="Nikon D60 Digital SLR Camera with 18-55mm f/3.5-5.6G VR Lens - 25438",
+    )
+    d90 = Record(
+        record_id="abt_buy:abt:35",
+        source="abt_buy",
+        title="Nikon D90 SLR Camera with 18-105mm f/3.5-5.6G ED VR Lens - 25448",
+    )
+    assert normalize(d60).model_number is None
+    assert normalize(d90).model_number is None
+    # The point is not that each is None but that they no longer collide.
+    assert normalize(d60).model_number_key == normalize(d90).model_number_key is None
+
+
+def test_a_one_character_prefix_before_a_slash_is_an_abbreviation_not_a_code():
+    # "w/" is "with", "f/" an f-stop, "b/w" black-and-white. Every real
+    # slash-bearing code measured on Abt-Buy carries at least two characters
+    # before the slash, "CV/FO-10" being the shortest of the 83 the gate is
+    # there to admit.
+    for title in (
+        "Logitech Gaming Keyboard w/PS2 Adapter",
+        "Canon Zoom Lens f/4-5.6 Telephoto",
+    ):
+        record = Record(record_id="abt_buy:36", source="abt_buy", title=title)
+        assert normalize(record).model_number is None, title
+
+    kept = Record(record_id="abt_buy:37", source="abt_buy", title="Casio Adapter - CV/FO-10")
+    assert normalize(kept).model_number == "CV/FO-10"
+
+
+def test_a_spec_segment_condemns_the_whole_slashed_token():
+    # "MOUNT/12-VOLT" is not a spec read as a whole -- it fails the
+    # <digits><unit> shape, so a check over the full key passes it -- and is
+    # obviously one read a segment at a time. Same for "1080p/60Hz".
+    for title in (
+        "Peerless TV Mount/12-Volt Accessory Kit",
+        "Sharp Projector 1080p/60Hz Input Module",
+    ):
+        record = Record(record_id="abt_buy:38", source="abt_buy", title=title)
+        assert normalize(record).model_number is None, title
+
+
+def test_a_decimal_measurement_is_not_a_code_but_a_dotted_code_is():
+    # Both survive code_key identically ("80211n", "9n00101"), so the printed
+    # form is the only place the difference exists: a measurement starts with
+    # the digits, a dotted vendor code carries a letter before its first ".".
+    # Every dotted code on the real catalog has one -- 9N00.101, 9S00.006,
+    # 1EG0.052.00, 9UEA.017.00 -- and every spec wearing a dot does not.
+    for title in (
+        "Netgear Wireless Router 802.11n Dual Band",
+        "Onkyo 7.1-Channel Home Theater Receiver",
+        "Kodak 10.1-Megapixel Digital Camera",
+    ):
+        record = Record(record_id="abt_buy:39", source="abt_buy", title=title)
+        assert normalize(record).model_number is None, title
+
+    for title, expected in (
+        ("TOMTOM GPS Receiver Accessory Kit - 9N00.101", "9N00.101"),
+        ("Targus Laptop Case - 1EG0.052.00", "1EG0.052.00"),
+    ):
+        record = Record(record_id="abt_buy:40", source="abt_buy", title=title)
+        assert normalize(record).model_number == expected, title
 
 
 def test_a_short_code_is_measured_as_the_source_wrote_it():

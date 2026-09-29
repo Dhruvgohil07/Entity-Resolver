@@ -21,12 +21,12 @@ python -m dedup.blocking.evaluate --dataset abt-buy --leave-one-out --out report
 
 | blocker | params | candidates | PC | RR | build s | query s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| standard (model number) | key=model_number_key, max_block=100 | 672 | 0.5832 | 0.9997 | 0.0 | 0.0 |
+| standard (model number) | key=model_number_key, max_block=100 | 670 | 0.5823 | 0.9997 | 0.0 | 0.0 |
 | standard (code tokens) | key=code-shaped title tokens, max_block=100 | 2,072 | 0.6708 | 0.9991 | 0.0 | 0.0 |
 | standard (rare tokens) | key=title tokens with df<=30, max_block=100 | 29,555 | 0.8694 | 0.9875 | 0.1 | 0.1 |
 | sorted_neighborhood | w=20 | 41,097 | 0.6190 | 0.9826 | 0.0 | 0.0 |
 | lsh (minhash) | 128p, t=0.4, token | 27,828 | 0.5894 | 0.9882 | 0.7 | 0.1 |
-| ann (faiss HNSW) | M=32, ef=100, k=10 | 14,603 | 0.9562 | 0.9938 | 2.7 | 2.4 |
+| ann (faiss HNSW) | M=32, ef=100, k=10 | 14,603 | 0.9562 | 0.9938 | 3.7 | 2.6 |
 | union (all) | — | 84,117 | 0.9928 | 0.9644 | — | — |
 
 **PC** is pair completeness — true pairs surviving, divided by all 1,118 ground-truth pairs (never by the survivors).

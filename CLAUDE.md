@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Ten stages implemented (`pytest` → 692 passing, 1 skipped; coverage not re-measured this sync).
+Ten stages implemented (`pytest` → 696 passing, 1 skipped; coverage not re-measured this sync).
 Two things are **not** covered by that run, and both are called out where they belong rather than
 folded into the count: the `semantic.py` carve-out inside the `features/` bullet, and the five
 report CLI entry points under the list.
@@ -79,13 +79,16 @@ report CLI entry points under the list.
   (`PairScorer` — featurizer, booster and calibrator as one servable artifact — plus `prepare`,
   the normalize/block/label glue), `calibrate.py` (Platt by default, beta available, both fit out
   of fold) and `evaluate.py` (the
-  CLI). **Test F1 0.8813** against the baseline's 0.5204, PR-AUC 0.9489, at a threshold chosen on
-  train and spent on test. The cost model's default 20 : 2 : 1 auto-merges 271 test pairs at
-  precision 0.9742, queues 19 for review and loses 61 outright. Result committed at
-  `reports/model.md`. That F1 is *down* from 0.8934 and the reason is recorded rather than
-  smoothed over: `monotone_constraints` costs Abt-Buy 0.0112 of F1 to buy a 28% cheaper bill and
-  half the false merges on `synth-20k`, which is the catalog large enough to exhibit the failure
-  it guards against (see Open questions). Four things are enforced rather than reviewed: `PairScorer.probabilities`
+  CLI). **Test F1 0.8892** against the baseline's 0.5204, PR-AUC 0.9472, at a threshold chosen on
+  train and spent on test. The cost model's default 20 : 2 : 1 auto-merges 269 test pairs at
+  precision 0.9740, queues 22 for review and loses 61 outright. Result committed at
+  `reports/model.md`. That F1 was 0.8813 before the shape gate stopped taking apertures as model
+  numbers and 0.8934 before `monotone_constraints`, and both reasons are recorded rather than
+  smoothed over: the constraint costs Abt-Buy F1 to buy a 28% cheaper bill and half the false merges
+  on `synth-20k`, the catalog large enough to exhibit the failure it guards against, and the gate fix
+  gave part of it back (see Open questions). The three-arm constraint table under Open questions was
+  measured *before* the gate fix, so its F1 column is stale as a description of today's booster while
+  its *ordering* is what it was ever quoted for. Four things are enforced rather than reviewed: `PairScorer.probabilities`
   refuses to return anything without a calibrator, because LightGBM's raw output is already in
   [0, 1] and would band cleanly while meaning nothing; `train_scorer` always fits its own
   featurizer, with no parameter to accept a prefit one, which makes the out-of-fold loop
@@ -107,14 +110,18 @@ report CLI entry points under the list.
   `components.py` (connected components, plus the label-free implied-pair count that exposes
   chaining), `agglomerative.py` (average linkage, merging while a merge lowers that cost),
   `correlation.py` (pivot and local search over the same objective) and `evaluate.py` (the CLI).
-  On the Abt-Buy test split, components over the auto-merge band reaches B³ F1 0.9375 but fuses 3
-  clusters through 16 implied pairs, realized cost 535; **average linkage reaches B³ P 1.0000 /
-  R 0.8860, fuses nothing, queues 29 pairs for review and bills 151** — against 281 for the
+  On the Abt-Buy test split, components over the auto-merge band reaches B³ F1 0.9358 but fuses 3
+  clusters through 16 implied pairs, realized cost 538; **average linkage reaches B³ P 1.0000 /
+  R 0.8829, fuses nothing, queues 32 pairs for review and bills 154** — against 284 for the
   pairwise bands alone on the same terms, and an all-singletons floor of B³ F1 0.6598. That
   precision is 1.0000 rather than the 0.9985 recorded before because fixing
   `_qualifies_as_model_number` removed the pipeline's only fusion surviving both cost-based
-  clusterers (see Open questions). Chaining is demonstrated, not hidden: at the best-pairwise-F1
-  threshold components fuses 26 clusters, the largest of 10 records. Result in `reports/cluster.md`. Three things are enforced rather than
+  clusterers, and it survived the second fix to that same gate (see Open questions). Chaining is
+  demonstrated, not hidden: at the best-pairwise-F1 threshold components fuses 20 clusters, the
+  largest of 10 records. One interpretive sentence flipped on measurement there and is worth
+  knowing: B³ F1 now *rises* at that threshold (0.9358 → 0.9390) where it used to fall, because
+  recall gains more than precision loses — which the renderer states as the reason no F1, pairwise
+  or B-cubed, should pick a threshold, since the precision lost is fused products. Result in `reports/cluster.md`. Three things are enforced rather than
   reviewed: every metric and cost refuses a label array whose length does not match the split, so
   a clusterer cannot flatter B-cubed by leaving out the records no edge touched; a lone pair
   merges exactly where the bands would auto-merge it; and correlation clustering starts its local
@@ -135,19 +142,23 @@ report CLI entry points under the list.
   `split_group`. Calibrated by hand against Abt-Buy train pair statistics, never test, to within
   ±0.05 on every calibrated row. Both catalogs are **fixed artifacts, not reproducible by
   re-running the generator today**: `families.base_product` picks a seed family's base listing by
-  `model_number_key`, and fixing `_qualifies_as_model_number` moved that choice for 6 of Abt-Buy's
-  755 train families, so a regeneration would write a *different* catalog rather than reproduce
-  these. They were deliberately kept (hash and seed-provenance checks both still pass), so that
-  every synthetic number moves for one attributable reason rather than two;
-  `synth.generate --report-only` re-renders `realism.md` against the catalog on disk without
-  rewriting it. The visible cost of that choice is that the catalog was calibrated against the
-  *old* extraction: the seeds now carry more codes (code keys equal 0.605 against the catalog's
-  0.561), so that row is now the widest calibration gap at -0.044 -- still inside the ±0.05
-  tolerance, but with 0.006 of margin rather than 0.040. `synth-20k` holds 18,829 records in
+  `model_number_key`, and **both** fixes to `_qualifies_as_model_number` moved that choice -- the
+  first for 6 of Abt-Buy's 755 train families, the second by rejecting apertures and prose -- so a
+  regeneration would write a *different* catalog rather than reproduce these. They were deliberately
+  kept (hash and seed-provenance checks both still pass), so that every synthetic number moves for
+  one attributable reason rather than two; `synth.generate --report-only` re-renders `realism.md`
+  against the catalog on disk without rewriting it, and confirms `catalog not rewritten` when it
+  does. The visible cost of that choice is that the catalog was calibrated against an *older*
+  extraction, and the second fix narrowed rather than widened the gap it left: code keys equal now
+  reads 0.605 against the catalog's 0.572, a -0.032 gap where it was -0.044, so the widest
+  calibration gap carries 0.018 of margin inside the ±0.05 tolerance rather than 0.006. One
+  *reported* (not calibrated) row did flip its verdict on that measurement -- sibling density, now
+  called sparser rather than matching -- which is recorded under Open questions rather than tuned
+  away. `synth-20k` holds 18,829 records in
   8,401 entities of up to eight records; `synth-200k` holds 165,714
   records, 83% of its target, because 15,085 requested siblings found no free code. Results in
   `reports/synth/`: `realism.md`, the five report CLIs on `synth-20k`, and `blocking-200k.md`. On
-  `synth-20k` the model reaches **test F1 0.7194** against its own baseline's 0.2867, with P@10
+  `synth-20k` the model reaches **test F1 0.7288** against its own baseline's 0.2867, with P@10
   and P@100 both 1.000 where they were 0.000 and 0.560 before `monotone_constraints`. The
   generator's `main()` is the one CLI with a test that calls it. An `er-invariants` audit found no
   violations and two findings worth closing, both closed: the seed split is no longer a flag, and
@@ -202,11 +213,16 @@ calls a `main()`, so coverage shows every line of all five unexecuted: argument 
 resolution, `--out` writing, the `--cost-*` flags, blocking's `--without` and `--ann-components`,
 and the baseline's `--min-similarity` would not fail a test run if they broke.
 All five were run by hand for this sync, on Abt-Buy and on `synth-20k`, plus `blocking` on
-`synth-200k` -- not as a reproduction check this time but because every one of their reports
-changed: fixing `_qualifies_as_model_number` moved extraction, and `monotone_constraints` moved
-the booster. `synth.generate`'s `main()` is the exception to the paragraph above and now covers
-its `--report-only` path too, including both argument combinations it refuses. Those are checks
-made once, not guards.
+`synth-200k` -- not as a reproduction check but because their reports changed again: the second fix
+to `_qualifies_as_model_number` (apertures and prose are no longer model numbers) moved extraction,
+as the first fix and `monotone_constraints` had before it. Each report's own "Regenerate with" block
+records the exact command used, which is what made regenerating twelve of them mechanical rather
+than archaeological. Two came back **byte-identical** and are worth naming, because that is a
+result and not an absence of one: `reports/baseline_tfidf.md` and `reports/synth/baseline_tfidf.md`,
+which confirms extraction does not reach the normalized title the baseline scores.
+`synth.generate`'s `main()` is the exception to the paragraph above and now covers its
+`--report-only` path too, including both argument combinations it refuses. Those are checks made
+once, not guards.
 
 `data/__init__.py`'s `DATASETS` registry and `load_dataset()` were the long-standing untested gap
 — exercised only by the CLIs, so a break would not have failed a test run — and
@@ -292,7 +308,11 @@ rather than just asserting it: the review queue is populated from `cluster.base.
 candidate-level review-band pairs against 87 queued), because a clustering partition can merge a
 pair the bands would have queued or leave apart one they would have auto-merged
 (`cluster/base.py`'s own documented fact). Using `assign_bands` for the queue would have produced
-one inconsistent with the clusters the same run returns.
+one inconsistent with the clusters the same run returns. Those two counts are from that one smoke
+run and **predate the shape-gate fix**, which moved every probability in the pipeline, so re-running
+it would give two different numbers; what the run established is that they differ and why, which is
+structural and does not depend on the pair. Unlike the twelve reports under `reports/`, this was
+never a committed artifact with a recorded command, so nothing regenerates it.
 
 Not yet built: the htmx review UI (CLAUDE.md's stack choices still name it; both v1 and v2 are JSON
 API only, by agreed scope), and reconciling entity identity across repeated runs or across the
@@ -313,10 +333,10 @@ could hold. The two measured levers CLAUDE.md named — `ann`'s neighbour count 
 projection, and a memory bound on LSH's candidate generation — both work: raising `ann`'s `k` to
 150 (behind the same SVD-128 projection) and capping `lsh` at 500 candidates per record lets every
 default blocker run on `synth-200k` for the first time, no `--without`, no OOM, reaching union pair
-completeness **0.8470** — a real ceiling, not a lower bound (`reports/synth/blocking-200k.md`).
+completeness **0.8469** — a real ceiling, not a lower bound (`reports/synth/blocking-200k.md`).
 Neither sweep is exhausted: both `k` and the LSH cap were still raising PC at the last value
 tested (k=10→50→100→150: PC 0.0597→0.2225→0.3805→0.5000; LSH cap=100→300→500: PC
-0.0871→0.3201→0.4042), so 0.8470 is what two swept-not-tuned parameters reach at a practical time
+0.0871→0.3201→0.4042), so 0.8469 is what two swept-not-tuned parameters reach at a practical time
 budget on this catalog, not a plateau — pushing either further is available, measured work, not a
 blocker. `default_blocker_set`'s literal defaults are unchanged (`k=10`, unbounded LSH — what
 every Abt-Buy/`synth-20k` report was measured with); both new parameters apply only via the
@@ -365,14 +385,14 @@ it touches re-verified, and both `service/` gaps closed, what is left is a real 
 independent options, not a default: build the htmx review UI now that both API halves exist, work
 through the measured-but-unresolved calls under Open questions, or something else entirely.
 
-`model/` answered the comparison the project is built around: **test F1 0.8813** against the
+`model/` answered the comparison the project is built around: **test F1 0.8892** against the
 baseline's 0.5204, at a threshold chosen on train and spent on test. Read `reports/model.md` before
 quoting it, because precision in those two rows is not measured on the same candidate set —
 blocking discarded 91% of the test triangle before the model saw anything, while the baseline
 scored the full N² triangle. Recall *is* like-for-like. Nothing in `reports/features.md` is that
 number either: those are univariate per-column PR-AUCs over the blocked candidate set, so
 `title_tfidf_cosine` scoring 0.5222 there against the baseline's 0.4720 PR-AUC measures the
-candidate set, not the column. On `synth-20k` the same pipeline reaches test F1 0.7194 against
+candidate set, not the column. On `synth-20k` the same pipeline reaches test F1 0.7288 against
 its own baseline's 0.2867, which was scored above a similarity floor of 0.2: that F1 is exact at
 its 0.7060 threshold, and its PR-AUC is a lower bound (`reports/synth/model.md`).
 
@@ -403,14 +423,22 @@ settled against more data rather than treated as decided:
   equal, to the literature's. Revisit when Amazon-Google lands: it has the same two-sided shape, so
   if the gap matters for comparison, the fix is a second reported number computed in `eval/`, never
   a side-aware branch in `blocking/` or `features/`.
-- **The spec-suffix list in `_SPEC_UNIT_SUFFIXES` is conservative on purpose.** It rejects `1200W`
-  and `12MP` as model numbers while deliberately omitting `wh` and `a`, which collide with real
-  vendor codes (Bose 161WH, HP Officejet 8500A). A false model number fuses unrelated products into
-  one block; a missing one only loses a signal — so the list should grow only against evidence.
+- **The spec-suffix list in `_SPEC_UNIT_SUFFIXES` is conservative on purpose, and the conservatism
+  is about *short* suffixes specifically.** It rejects `1200W` and `12MP` as model numbers while
+  deliberately omitting `wh` and `a`, which collide with real vendor codes (Bose 161WH, HP Officejet
+  8500A). A false model number fuses unrelated products into one block; a missing one only loses a
+  signal — so the list should grow only against evidence. The spelled-out units added alongside
+  them (`volt`, `channel`, `inch`, `megapixel`, `watt`, `hertz`, `pack`, …) are a deliberate
+  exception rather than a loosening of that rule: nothing sells a vendor code reading `12-VOLT` or
+  `7.1-CHANNEL`, so unlike `wh` and `a` they collide with nothing, and they became *reachable* only
+  once the spec check started running per `/`-separated segment — `MOUNT/12-VOLT` is not a spec read
+  whole. Both halves were measured on the real catalog, not reasoned about; see the shape-gate entry
+  below. Where a spelled-out unit would collide with a real code, the short-suffix rule applies and
+  it stays out.
 - **A review is charged per pair, not per cluster merge.** Pricing every pair a partition leaves
   apart at min(p·C_fs, C_review) keeps the clustering objective additive and bills clusters on
   exactly the terms `reports/model.md` bills its bands on, which is what makes `reports/cluster.md`'s
-  155 comparable with the bands' 265. But a reviewer shown a proposed merge of two clusters makes
+  154 comparable with the bands' 284. But a reviewer shown a proposed merge of two clusters makes
   one decision, not |A|·|B| of them, so per-pair billing overstates review for large clusters and
   under-queues their merges. On Abt-Buy's twos and threes the two readings barely differ. The
   under-queueing is measured, not hypothetical: on a triangle with edges 1.0, 1.0 and 0.91, both
@@ -429,9 +457,17 @@ settled against more data rather than treated as decided:
   shares. Two structural deviations are reported, not tuned away (`reports/synth/realism.md`):
   brand is withheld per listing independently, so both listings carry one on 26.3% of synthetic
   pairs against 1.0% of Abt-Buy's, and `desc_len_ratio` no longer points backwards; and every
-  sibling derives from one seed, so the sibling *rate* matches (0.512 against 0.557) while their
-  *shape* does not. Revisit against a second real catalog before trusting a synthetic number that
-  leans on either.
+  sibling derives from one seed, so their *shape* differs from the seeds', whose siblings are
+  independent products. The sibling *rate* used to match and no longer does: `realism.md` now reads
+  0.498 against the seeds' 0.552 and calls siblings **sparser**, where it previously read 0.508 and
+  called the rate a match. Nothing about the generator changed — the catalog on disk is untouched —
+  the shape gate stopped taking apertures and prose as codes, which moved what counts as "a
+  same-brand code within two edits" on both sides. Far siblings dilute the near ones, so a model
+  scored here meets fewer hard negatives than the seeds hold. That row is *reported*, not calibrated
+  (`realism.md` marks it `—`), so no ±0.05 tolerance is claimed for it and none is broken; every
+  calibrated row is still within, and the widest gap actually narrowed, code keys equal -0.044 →
+  -0.032. Revisit against a second real catalog before trusting a synthetic number that leans on
+  either deviation.
 - **Online lookup's recall against a real catalog is unmeasured.** `service/`'s lookup path only
   ever queries `ann` and `standard`'s `model_number`/`code_token` keys -- `lsh`,
   `sorted_neighborhood` and `standard`'s `rare_token_keys` are excluded because none of the three
@@ -483,6 +519,14 @@ settled against more data rather than treated as decided:
   | code columns only | **0.8957** | 0.9557 | **5** | **232** | 0.7212 | 0.7131 | 0.000 | 220 | 9,607 |
   | code + title (shipped) | 0.8813 | 0.9489 | 7 | 281 | 0.7194 | **0.7608** | **1.000** | **122** | **7,618** |
 
+  **All three rows predate the second shape-gate fix and are deliberately left as measured.** The
+  table's only job is the three-way comparison, which is valid only while every arm shares one
+  extraction — updating the shipped row alone would break exactly that. For reference, the shipped
+  arm now reads AB F1 0.8892 / PR-AUC 0.9472 / 7 false merges / cost 284 and 20k F1 0.7288 / PR-AUC
+  0.7675 / P@10 1.000 / 130 false merges / cost 7,659 (`reports/model.md`, `reports/synth/model.md`),
+  so the fix improved F1 and PR-AUC on both catalogs while the bill rose slightly on both. Re-running
+  the other two arms is the work required before any row here is quoted as current.
+
   The code-only arm was measured because it looked like it might dominate, and on Abt-Buy it does
   -- best F1, fewest false merges, cheapest bill of the three. It does not fix the thing the
   constraint exists for: `synth-20k`'s P@10 stays 0.000 and P@100 reaches only 0.220. The title
@@ -518,32 +562,85 @@ Settled by measurement, recorded so it is not re-litigated:
   model-number path passes a code taken from the raw title, blocking passes tokens from the folded
   one, and without that a precomposed `Ü` is dropped whole while a decomposed one keeps its base
   letter, keying the same code two ways.
-- **The hole in the fix above is closed: extraction's shape gate now agrees with `code_key`.**
-  `_qualifies_as_model_number` used to test the raw candidate token against `^[A-Za-z0-9-]+$`,
-  which rejects `/` -- so on `'Samsung YP-S2ZW 1GB Flash MP3 Player - YP-S2ZG/XAA'` the trailing,
-  correct code failed the gate and extraction fell through to the leading token, which is a
-  *different* listing's code entirely. The gate now runs against `code_key(token)`: a token is a
-  model number when its *comparison form* is model-number-shaped, which is the form
-  `_model_number_key` blocks on and `blocking/` indexes. Two details decided while applying it,
-  both measured rather than reasoned: the 4-character floor stays on the token **as printed**,
-  because moving it onto the key silently dropped real short codes (`XM-6`, `GR-4`, `IP-3`, whose
-  keys are three characters); and the spec check moved onto the key, which is a gain rather than a
-  cost, since `18-200MM` and `1.5TB` reduce to the digits-then-unit form the spec list is written
-  against and the raw-token gate never saw them.
+- **Extraction's shape gate reads the printed token *and* its `code_key`, each for what only it
+  can see.** Two fixes in opposite directions, and the second is why the first is recorded here
+  with its cost rather than as a clean win.
 
-  Blast radius, measured on the full Abt-Buy catalog before anything was regenerated: extraction
-  changes on 95 of 2173 records -- 66 codes previously missed entirely (`MB226LL/A`, `9N00.101`,
-  `EC-NV30ZSBA/US`, `HT-Z410/XAA`), 24 replaced by the trailing code the source actually printed,
-  5 correctly dropped as specs. What it bought: the model-number blocker's standalone pair
-  completeness **0.5349 → 0.5832**, `model_number_prefix_ratio`'s univariate PR-AUC 0.5784 →
-  0.6349 (it is now the top feature on Abt-Buy, ahead of `code_token_jaccard`), and
-  `model_number_exact`'s 0.4714 → 0.5269. The leave-one-out table below is **unchanged** -- the
-  model-number blocker stays entirely subsumed, because every pair its better keys find, something
-  else finds too. Both predicted error flips happened: `reports/cluster.md`'s Green/White fusion,
-  the pipeline's only one surviving both cost-based clusterers, is gone from the chaining section
-  entirely, and average linkage now reaches B³ precision **1.0000** with **0 fused clusters**
-  (from 0.9985 and 1). Pinned by four tests in `tests/test_normalize.py` naming the failure mode,
-  the separator family, the spec-wearing-a-separator case and the short-code floor.
+  `_qualifies_as_model_number` originally tested the raw candidate token against
+  `^[A-Za-z0-9-]+$`, which rejects `/` -- so on
+  `'Samsung YP-S2ZW 1GB Flash MP3 Player - YP-S2ZG/XAA'` the trailing, correct code failed the gate
+  and extraction fell through to the leading token, which is a *different* listing's code entirely.
+  Moving the gate onto `code_key(token)` fixed that, on the principle that a token is a model
+  number when its *comparison form* is model-number-shaped -- the form `_model_number_key` blocks
+  on and `blocking/` indexes. Two details settled then still hold: the 4-character floor stays on
+  the token **as printed**, because moving it onto the key silently dropped real short codes
+  (`XM-6`, `GR-4`, `IP-3`, whose keys are three characters); and the spec check runs on the key,
+  since `18-200MM` and `1.5TB` reduce to the digits-then-unit form the spec list is written against
+  and the raw-token gate never saw them.
+
+  **That overshot, and `/code-review` caught it.** `code_key` strips exactly the separators that
+  distinguish a code from a measurement, so a gate reading nothing else cannot tell `9N00.101` (a
+  real Targus code) from `802.11n` (a WiFi standard) -- and it admitted `f/3.5-5.6G`, a lens
+  aperture, as a model number. On Abt-Buy that gave the Nikon D60 kit (`e00465`) and the D90 kit
+  (`e00883`), two different products, the single shared key `f3556g`, setting `model_number_exact`
+  and `model_number_prefix_ratio` to 1 for their pair; both columns are monotone-constrained, so a
+  false key there can *only* push a score up. That is precisely the "a false model number fuses
+  unrelated products into one block" cost the `_SPEC_UNIT_SUFFIXES` entry above exists to avoid,
+  reintroduced one layer above the list it is written on.
+
+  The fix was measured against the real population rather than argued from the two examples. Of the
+  90 Abt-Buy extractions the original `^[A-Za-z0-9-]+$` gate rejected, **83 are genuine vendor
+  codes** (`MB226LL/A`, `EC-NV30ZSBA/US`, `2595B002(AA)`, `#EL012A`, `9N00.101`, `NIKO_215930348`)
+  and **7 are specs or prose**. Reverting the char-class gate to kill the 7 would have cost the 83,
+  so three rules on the printed form separate them instead: a single character before a `/` is an
+  English abbreviation and not a code stem (`f/`, `w/`, `b/w` -- the shortest real slash-code
+  measured is `CV/FO-10`); one spec segment condemns the whole token (`MOUNT/12-VOLT`,
+  `1080p/60Hz`), which is why the spec check now runs per `/`-separated segment and why
+  `_SPEC_UNIT_SUFFIXES` grew spelled-out units; and a `.` marks a decimal measurement when pure
+  digits start the segment, which is the one thing separating `802.11n` and `2.7-Inch` from
+  `9N00.101` and `1EG0.052.00` -- every dotted code on the real catalog carries a letter before its
+  first `.` and every dotted spec does not.
+
+  Blast radius of the second fix, measured before anything was regenerated: extraction changes on
+  **8 of 2173** Abt-Buy records, all 8 from a false spec to nothing, and on **311 of 18,829**
+  `synth-20k` records -- where it is better than neutral, because 200-odd of those were extracting
+  a spec *ahead of* the real vendor code (`7.1-CHANNEL` instead of `TXSR798W`, `5-PACK` instead of
+  `LMAF877RE6`) and now get the code. What it cost on Abt-Buy: the model-number blocker's
+  standalone PC **0.5832 → 0.5823**, with the union unchanged -- it is entirely subsumed, so losing
+  a key costs blocking nothing; `model_number_prefix_ratio` coverage 0.7422 → 0.7318 and univariate
+  PR-AUC 0.6349 → 0.6320, `model_number_exact`'s 0.5269 → 0.5239. Both columns' class *separation*
+  rose even as their PR-AUC fell (+0.7975 → +0.8031 and +0.6839 → +0.6879), which is what removing
+  false positives from a column should look like. Downstream it is a clear gain: **test F1 0.8813 →
+  0.8892** at precision 0.8603 → 0.8958, and Platt's ECE 0.00101 → 0.00087. The realized bill rises
+  **281 → 284**, because 3 pairs moved from auto-merge into review; the cost model is what this
+  project optimizes, so that is stated rather than buried under the F1.
+
+  One correction the review forces, recorded rather than smoothed over: the first fix's blast radius
+  ("66 codes previously missed entirely, 24 replaced, 5 correctly dropped as specs") counted some of
+  these aperture and prose extractions among its improvements, so the gains it claimed
+  (PC 0.5349 → 0.5832, `prefix_ratio` PR-AUC 0.5784 → 0.6349) were slightly inflated. The corrected
+  figures are the ones above. No test caught this and no report disagreed with itself; it surfaced
+  only because someone read the gate against real titles.
+
+  `synth-20k` shows the failure removed in the form the review predicted, which Abt-Buy is too small
+  to display. `reports/synth/cluster.md` used to carry a **4-record, 4-entity** fusion held together
+  by nothing but `7.1-Channel` — cross-entity edges at 0.9772 / 0.9703 / 0.9616, *still fused* under
+  both cost-based clusterers, and spanning two different seed families and two brands (`Samsung
+  7.1-Channel Home Theater System`, `Onkyo Black 7.1-Channel Home Theater sys`). It is gone from the
+  chaining section entirely. That is the review's "a false model number fuses unrelated products"
+  claim observed end to end rather than argued: a spec became a shared key, the key became a
+  perfect-match feature under a monotone constraint, and the constraint carried four distinct
+  entities into one cluster. The honest counterweight is that average linkage's *total* fused count
+  on that catalog rose 29 → 32 as every other probability moved, so this bought one named,
+  understood fusion and not a lower count.
+
+  Both of the first fix's predicted error flips survive the second: `reports/cluster.md`'s
+  Green/White fusion is still gone from the chaining section, and average linkage still reaches B³
+  precision **1.0000** with **0 fused clusters**. Pinned by eight tests in `tests/test_normalize.py`
+  -- four from the first fix (the `YP-S2ZG/XAA` regression, the separator family, the
+  spec-wearing-a-separator case, the short-code floor) and four from the second, naming the aperture
+  fusion by entity id, the one-character-prefix abbreviation, the spec segment, and the
+  decimal-against-dotted-code contrast.
 - **The blocker sweep carries no selection optimism, because pair completeness is monotone in
   every parameter swept.** Recorded for a long time as a caveat on the 0.9928 ceiling ("a
   best-of-sweep number, not a clean estimate — small bias here, but unquantified"), and the worry
@@ -619,7 +716,7 @@ Settled by measurement, recorded so it is not re-litigated:
   | blocker | marginal candidates | marginal PC |
   | --- | ---: | ---: |
   | `standard (model number)` | +0 | +0.0000 |
-  | `standard (code tokens)` | +7,146 | +0.0026 |
+  | `standard (code tokens)` | +7,741 | +0.0022 |
   | `standard (rare tokens)` | +46,051 | +0.0157 |
   | `sorted_neighborhood` | +257,234 | +0.0147 |
   | `lsh (minhash)` | +1,233,795 | +0.0343 |
@@ -668,8 +765,10 @@ Settled by measurement, recorded so it is not re-litigated:
   (unbounded), what every Abt-Buy/`synth-20k` report — including the one recording the OOM — was
   measured with; a catalog past that budget spends a cap explicitly via `--lsh-max-neighbours`.
   Combined with `ann` at `k`=150, every default blocker now runs on `synth-200k` for the first
-  time — no `--without`, no OOM — reaching union pair completeness **0.8470**
-  (`reports/synth/blocking-200k.md`), against 0.6712 with `lsh` omitted entirely. Neither lever was
+  time — no `--without`, no OOM — reaching union pair completeness **0.8469**
+  (`reports/synth/blocking-200k.md`), against 0.6712 with `lsh` omitted entirely -- that last figure
+  is a one-off from a `--without lsh` run, not the committed command, so it predates the shape-gate
+  fix and is the one number in this entry that has not been re-measured. Neither lever was
   pushed to its limit; both are available, measured, swept-not-tuned levers for whoever revisits
   this ceiling.
 - **What blocking still misses is a different identifier system, not a near-miss.** Of 1,118 true
@@ -721,10 +820,14 @@ Settled by measurement, recorded so it is not re-litigated:
   human reading the column name does not, which is why `reports/features.md` calls it out. This
   is also the most concrete cost yet measured for the framing question left open above.
 - **Vendor-code columns dominate the feature ranking, as predicted.** Top five by univariate
-  PR-AUC on test: `model_number_prefix_ratio` 0.6349, `code_token_jaccard` 0.6274,
-  `model_number_exact` 0.5269, `title_tfidf_cosine` 0.5222, `code_best_ratio` 0.4646. The two
+  PR-AUC on test: `model_number_prefix_ratio` 0.6320, `code_token_jaccard` 0.6274,
+  `model_number_exact` 0.5239, `title_tfidf_cosine` 0.5222, `code_best_ratio` 0.4646. The two
   `model_number_*` columns moved up when extraction was fixed to gate on `code_key` -- coverage
-  0.6917 → 0.7422 carried `prefix_ratio` past `code_token_jaccard` into first place. A test
+  0.6917 → 0.7422 carried `prefix_ratio` past `code_token_jaccard` into first place -- and then
+  part way back down when the same gate was taught to reject apertures and prose again (coverage
+  0.7318, PR-AUC 0.6349 → 0.6320), which leaves `prefix_ratio` first by 0.0046 rather than 0.0075.
+  Both columns' class separation rose across that second change even as their PR-AUC fell; see the
+  shape-gate entry above. A test
   asserts the code columns stay at the top — if they ever do not, the feature is broken, not the
   claim. Worth noting `cross_title_desc_cosine_max` reaches 0.4473: the column added for the
   truncated-title failure reads 0.7056 on the `LMV1680WH` / `1.6 cu.ft.` pair where every string
@@ -824,13 +927,13 @@ Settled by measurement, recorded so it is not re-litigated:
   be *fitted*, since the costs are business prices rather than quantities data estimates, but two
   measured facts now bound it. At `C_fm` 100 (`p_hi` 0.99) nothing merges at all, because
   calibrated probabilities barely reach that high; and the cheapest ratio in the grid on realized
-  cost is 10 : 2 (6,681 against the default's 7,618), which bills the synthetic catalog's own error
+  cost is 10 : 2 (6,641 against the default's 7,659), which bills the synthetic catalog's own error
   mix and so is no reason to move the default. It stays 20 : 2 : 1.
 
   One of the two bounds previously recorded here has been **overturned, and by something worth
   noticing**: at `C_fm` 50 auto-merge used to collapse from 3,549 pairs to 273 while its precision
   *fell* to 0.8388 — a tighter merge bar admitting a *worse* set, which is not how a threshold is
-  supposed to behave. Under `monotone_constraints` that row reads 1,381 pairs at precision 0.9848,
+  supposed to behave. Under `monotone_constraints` that row reads 1,611 pairs at precision 0.9845,
   rising with the bar as it should. The anomaly was the same pathological high-score region the
   `error-analyst` pass found at the top of the synthetic ranking, seen from the cost model's side
   instead of the ranking's; constraining the booster removed both. It is recorded rather than
@@ -847,18 +950,20 @@ Settled by measurement, recorded so it is not re-litigated:
   touches.
 - **Clusters keep the bands' three outcomes: a partition merges only where merging beats both
   review and rejection.** The obvious clusterer is connected components over `p_hi` edges, and on
-  the Abt-Buy test split it chains: 3 fused clusters through 16 implied pairs, realized cost 535.
+  the Abt-Buy test split it chains: 3 fused clusters through 16 implied pairs, realized cost 538.
   The first fix weighed merge against split alone, which breaks even at τ = C_fm / (C_fm + C_fs),
   0.9091 — but τ always lies inside the review band, so it auto-merged pairs the bands price as
   cheaper to review; the `er-invariants` audit caught it before commit. Pricing each pair a
   partition leaves apart at min(p·C_fs, C_review) instead makes a lone pair merge exactly at
-  `p_hi`, and average linkage on that objective bills 151 against the bands' own 281, with B³ P
-  0.9877 → 1.0000 for R 0.8921 → 0.8860 and 29 pairs queued. On `synth-20k`, with entities up to
-  eight records, average linkage reaches B³ recall 0.7243 against components-at-`p_hi`'s 0.7502
-  (−0.026, against −0.006 on Abt-Buy) and splits 938 entities against 889, and the 346 true pairs
+  `p_hi`, and average linkage on that objective bills 154 against the bands' own 284, with B³ P
+  0.9877 → 1.0000 for R 0.8891 → 0.8829 and 32 pairs queued. On `synth-20k`, with entities up to
+  eight records, average linkage reaches B³ recall 0.7287 against components-at-`p_hi`'s 0.7548
+  (−0.026, against −0.006 on Abt-Buy) and splits 922 entities against 869, and the true pairs
   blocking never emitted — 251 of which transitivity recovers — are exactly the pairs the objective
-  prices at p = 0. Its bill still beats the bands' on the same terms, 7,252 against 7,618, and
-  fixing extraction plus constraining the booster cut its fused clusters from 69 to 29.
+  prices at p = 0. Its bill still beats the bands' on the same terms, 7,279 against 7,659, and
+  fixing extraction plus constraining the booster cut its fused clusters from 69 to 29, then the
+  second shape-gate fix moved them back to 32 — that count is not monotone in scorer quality, and
+  one specific fusion it *did* remove is named in the shape-gate entry above.
 
   **The entity-size breakdown this entry set as a precondition is now measured, and it confirms
   p = 0 under-merging with a clean dose-response.** B³ recall on `synth-20k`'s test split, average
@@ -875,6 +980,14 @@ Settled by measurement, recorded so it is not re-litigated:
   | 7 | 203 | 0.5552 | 0.6087 | -0.0535 |
   | 8 | 184 | 0.6250 | 0.7391 | -0.1141 |
   | overall | 5,663 | 0.7243 | 0.7502 | -0.0259 |
+
+  **The per-size rows predate the second shape-gate fix and are a one-off measurement, not a
+  committed report — re-derive them before quoting a single row.** The overall row does re-derive
+  from `reports/synth/cluster.md` as it stands: 0.7287 against 0.7548, a **-0.0261** deficit where
+  this table recorded -0.0259. So the aggregate the conclusion rests on is unchanged to within
+  0.0002 across a scorer change that moved every probability, which is the reason the dose-response
+  reading below is left standing rather than re-measured: the mechanism is structural (unemitted
+  pairs priced at p = 0), not a property of one booster.
 
   The deficit is ~0 at size 2 and -0.1141 at size 8, rising with size almost monotonically. That
   is the predicted signature and the mechanism is not subtle: an entity of *k* records implies
@@ -894,27 +1007,28 @@ Settled by measurement, recorded so it is not re-litigated:
   pairs at the catalog's base rate instead of 0; exclude them from average linkage's mean entirely,
   so absence of evidence stops being evidence of absence; or price them at `p_lo`. The second is the
   most principled and the most invasive — it breaks the objective's current claim to bill every pair
-  a partition decides, which is what makes `reports/cluster.md`'s 151 comparable with the bands' 281,
+  a partition decides, which is what makes `reports/cluster.md`'s 154 comparable with the bands' 284,
   and `cluster/base.py`'s objective is the one an `er-invariants` audit has already caught once.
   Worth doing, worth doing deliberately.
 - **A lower expected cost did not buy a better partition, because the scorer bounds the
   objective — and this now survives the scorer change that was meant to revisit it.** Correlation
-  clustering finds expected cost 165.2 against average linkage's 166.1, yet bills 190 against 151:
+  clustering finds expected cost 170.1 against average linkage's 171.0, yet bills 193 against 154:
   it re-fuses the Weber 3780001 / 3880001 grills, whose cross-entity pairs the model scores
   0.97–0.99, so under the model fused *is* cheaper — average linkage separates them by merge order,
   not by the objective. It is now the *only* fusion either cost-based clusterer makes on this
   split, average linkage having dropped to zero once extraction was fixed. The true partition costs
-  1,356.7 in expectation, because merging the true pairs the model rejects is priced as false
+  1,353.8 in expectation, because merging the true pairs the model rejects is priced as false
   merges, so no search over this objective reaches the ceiling.
 
   This entry used to end "Revisit when an `error-analyst` pass changes the scorer." That trigger
   has now fired twice over — the `code_key` extraction fix and `monotone_constraints` together
   moved every probability in the pipeline, and on `synth-20k` they cut average linkage's fused
   clusters from 69 to 29 — and the relationship is unchanged on both catalogs: correlation
-  clustering reaches the lower expected cost (8,047.2 against 8,055.7 on `synth-20k`) and the
-  higher realized bill (7,303 against 7,252). Two catalogs, two materially different scorers, same
-  direction. That is no longer a curiosity about one model's errors; it is a property of optimizing
-  a proxy whose weights are themselves estimates.
+  clustering reaches the lower expected cost (7,802.0 against 7,808.9 on `synth-20k`) and the
+  higher realized bill (7,295 against 7,279). Three scorers now, across two catalogs, same
+  direction — the second shape-gate fix moved every probability again and did not touch it. That is
+  no longer a curiosity about one model's errors; it is a property of optimizing a proxy whose
+  weights are themselves estimates.
 
   **So the choice is settled: average linkage is the default, and `service/batch.py` is right to
   hardcode it** (`CLUSTERER = "average_linkage"`). This file previously said "`service/` has not
@@ -1102,7 +1216,10 @@ reason: either number alone is trivially gamed by moving the threshold.
   token drop and reorder, unit respellings, code punctuation and alternate part numbers, price jitter,
   brand aliasing) — with known ground truth. Generate the registered catalogs (gitignored under
   `data/synth/`) with the commands below; at 165,714 records blocking's union reaches pair
-  completeness 0.6712, which is the problem the catalog was built to expose.
+  completeness **0.8469** against 0.9928 on Abt-Buy, with 27,710 of 181,045 true pairs never
+  becoming candidates — which is the problem the catalog was built to expose
+  (`reports/synth/blocking-200k.md`). That figure needs the two scale levers spent explicitly
+  (`--ann-neighbours 150 --lsh-max-neighbours 500`); the default blocker set cannot run here at all.
 
 ## Baseline to beat
 
@@ -1136,7 +1253,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (692 passing, 1 skipped)
+pytest                                  # all (696 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
