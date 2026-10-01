@@ -319,18 +319,28 @@ def report():
 
 
 @needs_data
-def test_components_at_p_hi_reproduce_the_planning_measurement(report):
-    """Measured before this package existed, with scipy and a B-cubed written inline.
+def test_components_at_p_hi_matches_the_committed_report(report):
+    """A regression pin on `reports/cluster.md`'s components row.
 
-    Two independent implementations agreeing is what makes the committed numbers
-    worth quoting.
+    It was more than that once: the original figures (B³ P 0.9880 / R 0.9054,
+    4 fused clusters, 11 implied pairs) were measured before this package
+    existed, with scipy and a B-cubed written inline, and two independent
+    implementations agreeing is what made them worth quoting. That
+    corroboration does not transfer across a change to what the model scores.
+    Two changes to `_qualifies_as_model_number` have moved extraction since --
+    gating the shape on `code_key` (95 of 2173 Abt-Buy records), then teaching
+    it to read the printed token again so an aperture stops being a code (8
+    more) -- and each moves every probability downstream, so the numbers below
+    are the current pipeline's and are pinned only against itself; the
+    independent cross-check stands in git history against the extraction of
+    its day.
     """
     hi = report.row(COMPONENTS_HI)
-    assert hi.bcubed.precision == pytest.approx(0.9880, abs=5e-5)
-    assert hi.bcubed.recall == pytest.approx(0.9054, abs=5e-5)
-    assert hi.errors.n_fused_clusters == 4
-    assert hi.n_implied_pairs == 11
-    assert len(report.fused) == 4
+    assert hi.bcubed.precision == pytest.approx(0.9877, abs=5e-5)
+    assert hi.bcubed.recall == pytest.approx(0.8891, abs=5e-5)
+    assert hi.errors.n_fused_clusters == 3
+    assert hi.n_implied_pairs == 16
+    assert len(report.fused) == 3
 
 
 @needs_data
@@ -346,12 +356,12 @@ def test_every_row_scores_every_record_and_every_true_pair(report):
 def test_merging_nothing_bills_exactly_what_the_bands_route(report):
     """The cross-stage check that the two reports bill on one set of terms.
 
-    With no merges, every pair `reports/model.md` sends to auto-merge (280) or review
-    (13) is queued, and its 56 auto-rejected true pairs are the only misses.
+    With no merges, every pair `reports/model.md` sends to auto-merge (269) or review
+    (22) is queued, and its 61 auto-rejected true pairs are the only misses.
     """
     floor = report.row(SINGLETONS)
-    assert floor.n_review == 280 + 13
-    assert floor.realized_cost == 293 * 1 + 56 * 2
+    assert floor.n_review == 269 + 22
+    assert floor.realized_cost == 291 * 1 + 61 * 2
 
 
 @needs_data
@@ -402,8 +412,8 @@ def test_the_chaining_section_names_every_fused_cluster(report):
 
 @needs_data
 def test_the_bands_alone_bill_what_reports_model_md_bills(report):
-    """7 false merges at 20, 13 reviews, 56 misses at 2 -- nothing lost to blocking on test."""
-    assert report.band_realized_cost == 7 * 20 + 13 * 1 + 56 * 2
+    """7 false merges at 20, 22 reviews, 61 misses at 2 -- nothing lost to blocking on test."""
+    assert report.band_realized_cost == 7 * 20 + 22 * 1 + 61 * 2
 
 
 @needs_data
@@ -419,7 +429,10 @@ def test_a_lower_expected_cost_does_not_buy_the_better_partition_here(report):
     assert correlation.expected_cost < linkage.expected_cost
     assert linkage.realized_cost < correlation.realized_cost
     assert linkage.realized_cost < report.band_realized_cost
-    assert linkage.errors.n_fused_clusters == 1
+    # 1 before `_qualifies_as_model_number` was fixed to gate on `code_key`:
+    # the single fusion that survived both cost-based clusterers was the
+    # Green/White Samsung pair that fix produced, and it is gone.
+    assert linkage.errors.n_fused_clusters == 0
     assert report.row(ORACLE).expected_cost > correlation.expected_cost
     text = flat(render_markdown(report))
     assert "ground truth disagree on the winner" in text

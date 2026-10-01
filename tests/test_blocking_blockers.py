@@ -62,6 +62,7 @@ ALL_BLOCKERS = [
     SortedNeighborhoodBlocker(window=4),
     MinHashLSHBlocker(threshold=0.3, shingles="token"),
     MinHashLSHBlocker(threshold=0.3, shingles="char"),
+    MinHashLSHBlocker(threshold=0.3, shingles="token", max_neighbours=3),
     AnnBlocker(neighbours=3),
 ]
 
@@ -162,6 +163,46 @@ def test_a_block_larger_than_the_cap_is_dropped_not_expanded():
 def test_max_block_size_below_two_is_rejected():
     with pytest.raises(ValueError, match="at least 2"):
         StandardBlocker("codes", code_token_keys, max_block_size=1)
+
+
+# ---------------------------------------------------------------------------
+# The LSH memory bound
+# ---------------------------------------------------------------------------
+
+
+def test_records_with_more_than_the_cap_of_lsh_neighbours_are_dropped_not_expanded():
+    # Near-identical titles put every record in every other's LSH neighbourhood --
+    # at 200k records a whole sibling family can crowd one record's query result
+    # the same way a runaway exact-key block does, and nothing capped it: 222M
+    # raw candidate pairs failed a 1.66 GiB allocation.
+    shared = [
+        rec(f"s:{i}", f"acme super widget deluxe alpha beta gamma delta epsilon record{i}", f"e{i}")
+        for i in range(12)
+    ]
+    blocker = MinHashLSHBlocker(max_neighbours=3)
+    run = blocker.run(shared)
+
+    assert blocker.dropped_records > 0
+
+    # A dropped record's neighbours vanish with no other trace, so it has to
+    # reach the report. An invisible cap is a silently lowered ceiling -- the
+    # same class of problem as a hidden recall denominator.
+    assert run.warnings, "dropping a record's neighbours must be surfaced, not silent"
+    assert "max_neighbours" in run.warnings[0]
+
+    # The same records under a larger cap keep more, so the cap is what changed.
+    kept = MinHashLSHBlocker(max_neighbours=50).run(shared)
+    assert kept.n_candidates > run.n_candidates
+    assert kept.warnings == ()
+
+
+def test_lsh_max_neighbours_below_one_is_rejected():
+    with pytest.raises(ValueError, match="at least 1"):
+        MinHashLSHBlocker(max_neighbours=0)
+
+
+def test_unbounded_lsh_never_drops_a_record():
+    assert MinHashLSHBlocker().run(CATALOG).warnings == ()
 
 
 # ---------------------------------------------------------------------------

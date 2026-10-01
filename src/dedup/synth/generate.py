@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 
 from dedup.data import DATASETS, load_dataset
-from dedup.data.synthetic import read_manifest, write_catalog
+from dedup.data.synthetic import load_synthetic, read_manifest, write_catalog
 from dedup.eval.splits import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -248,6 +248,47 @@ def generate(seeds: Sequence[Record], config: SynthConfig) -> SynthCatalog:
     )
 
 
+def verify_seed_provenance(
+    catalog_records: Sequence[Record],
+    seed_records: Sequence[Record],
+    *,
+    test_fraction: float = DEFAULT_TEST_FRACTION,
+    seed: int = DEFAULT_SEED,
+) -> None:
+    """Refuse a catalog whose embedded seed entities are not really on the train side.
+
+    `data/synthetic.py`'s loader only compares the manifest's recorded `seed_split`
+    numbers (test_fraction, seed) against what a report expects -- it never re-derives
+    the split from the seed dataset's own records. That check cannot catch a
+    `split_by_entity` change (or a hand-edited manifest) that moves an entity from
+    train to test without changing either number: the two recorded numbers can stay
+    correct while the *set* of entities they produce drifts.
+
+    This closes that gap by reloading `seed_records` and recomputing the split with
+    the **current** code, then checking every seed entity id embedded in the catalog
+    (`raw_attributes["seed_entity_id"]`) against the train side that produces --
+    not what the manifest claims. Deliberately not called from `load_synthetic`,
+    which stays free of a hard dependency on the seed dataset being present; call
+    this from `main()` after generating, or standalone against a catalog already on
+    disk (see `tests/test_synth_generate.py`).
+    """
+    train, _ = split_by_entity(list(seed_records), test_fraction=test_fraction, seed=seed)
+    train_entity_ids = {record.entity_id for record in train}
+    leaked = sorted(
+        {
+            entity_id
+            for record in catalog_records
+            if (entity_id := record.raw_attributes.get("seed_entity_id")) not in train_entity_ids
+        }
+    )
+    if leaked:
+        raise ValueError(
+            f"{len(leaked)} seed entity id(s) behind this catalog are not on the train side "
+            f"of the seed split just re-derived from the real seed records, e.g. {leaked[:3]} "
+            f"-- the catalog's manifest claims a seed_split its records do not actually match"
+        )
+
+
 def catalog_manifest(
     catalog: SynthCatalog,
     *,
@@ -275,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed-dataset", default="abt-buy", choices=sorted(DATASETS))
     parser.add_argument("--root", type=Path, default=None, help="override the seed dataset directory")
-    parser.add_argument("--records", type=int, required=True, help="target record count")
+    parser.add_argument(
+        "--records", type=int, default=None, help="target record count; required unless --report-only"
+    )
     parser.add_argument("--seed", type=int, default=0, help="generator seed")
     parser.add_argument(
         "--out", type=Path, required=True, help="directory for records.jsonl and manifest.json"
@@ -287,6 +330,15 @@ def main(argv: list[str] | None = None) -> int:
         help="also write the realism report here -- seeds against synthetic; its sibling "
         "statistic is quadratic in a brand's entities, so keep it to mid-scale catalogs",
     )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="render --report against the catalog already in --out instead of generating one. "
+        "A committed catalog is a fixed artifact: normalize.py has moved since synth-20k and "
+        "synth-200k were written, and families.base_product picks a seed family's base listing "
+        "by model_number_key, so regenerating would write a different catalog rather than "
+        "reproduce one. This re-renders the report against what is on disk.",
+    )
     args = parser.parse_args(argv)
 
     records = load_dataset(args.seed_dataset, args.root)
@@ -294,32 +346,59 @@ def main(argv: list[str] | None = None) -> int:
     # could hold records the seed dataset's reports test on, and data/synthetic.py
     # refuses to load one.
     train, _ = split_by_entity(records, test_fraction=DEFAULT_TEST_FRACTION, seed=DEFAULT_SEED)
-    catalog = generate(train, SynthConfig(target_records=args.records, seed=args.seed))
-    digest = write_catalog(
-        args.out,
-        catalog.records,
-        catalog_manifest(
-            catalog,
-            seed_dataset=args.seed_dataset,
-            split_test_fraction=DEFAULT_TEST_FRACTION,
-            split_seed=DEFAULT_SEED,
-            n_seed_records=len(train),
-        ),
-    )
-    print(
-        f"wrote {len(catalog.records):,} records in {len(catalog.entities):,} entities from "
-        f"{catalog.n_families:,} seed families ({catalog.n_dropped_siblings:,} requested "
-        f"siblings found no free code) to {args.out}\nrecords sha256 {digest}",
-        file=sys.stderr,
-    )
+    if args.report_only:
+        if args.report is None:
+            parser.error("--report-only needs --report: it renders a report and nothing else")
+        if args.records is not None:
+            parser.error("--report-only ignores --records; it reads the catalog in --out")
+        # Through the registry loader, so the report is rendered against a
+        # catalog that passed the same manifest, hash and seed-split checks a
+        # normal load applies -- not against whatever happens to be in the
+        # directory.
+        catalog_records = load_synthetic(args.out, seed_dataset=args.seed_dataset)
+        print(
+            f"read {len(catalog_records):,} records from {args.out} (catalog not rewritten)",
+            file=sys.stderr,
+        )
+    else:
+        if args.records is None:
+            parser.error("--records is required unless --report-only")
+        catalog = generate(train, SynthConfig(target_records=args.records, seed=args.seed))
+        # Currently a no-op given generate()'s implementation -- every seed entity id it
+        # emits is drawn from `train` in this same call, so it cannot yet disagree. It is
+        # a safety net against a future change to generate() that draws from elsewhere;
+        # the check that actually closes the gap is the standalone one against a catalog
+        # already on disk, reloading the seed dataset independently (see test suite).
+        verify_seed_provenance(
+            catalog.records, records, test_fraction=DEFAULT_TEST_FRACTION, seed=DEFAULT_SEED
+        )
+        digest = write_catalog(
+            args.out,
+            catalog.records,
+            catalog_manifest(
+                catalog,
+                seed_dataset=args.seed_dataset,
+                split_test_fraction=DEFAULT_TEST_FRACTION,
+                split_seed=DEFAULT_SEED,
+                n_seed_records=len(train),
+            ),
+        )
+        catalog_records = catalog.records
+        print(
+            f"wrote {len(catalog.records):,} records in {len(catalog.entities):,} entities from "
+            f"{catalog.n_families:,} seed families ({catalog.n_dropped_siblings:,} requested "
+            f"siblings found no free code) to {args.out}\nrecords sha256 {digest}",
+            file=sys.stderr,
+        )
 
     if args.report is not None:
         markdown = render_realism(
             pair_statistics(train),
-            pair_statistics(catalog.records),
+            pair_statistics(catalog_records),
             read_manifest(args.out),
             catalog=args.out.as_posix(),
             out=args.report.as_posix(),
+            report_only=args.report_only,
         )
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(markdown + "\n", encoding="utf-8")

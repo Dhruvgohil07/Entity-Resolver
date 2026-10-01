@@ -117,3 +117,6 @@ desktop.ini
 # ---------------------------------------------------------------------------
 .claude/settings.local.json
 .claude/worktrees/
+
+# Personal reference notes, not part of the project's history.
+PROJECT_NOTES.pdf

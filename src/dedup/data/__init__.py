@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from dedup.data.abt_buy import load_abt_buy
@@ -57,17 +58,18 @@ DATASETS: dict[str, DatasetSpec] = {
     # Synthetic catalogs derived from Abt-Buy's train split by synth/, written by
     # `python -m dedup.synth.generate --records <n> --out <root>`. Gitignored like
     # every other dataset under data/, and refused by the loader if they no longer
-    # match their manifest.
+    # match their manifest -- including a manifest claiming a seed_dataset other
+    # than "abt-buy", which is what these two entries are seeded from.
     "synth-20k": DatasetSpec(
         name="synth-20k",
         default_root=Path("data/synth/abt-buy-train-20k"),
-        load=load_synthetic,
+        load=partial(load_synthetic, seed_dataset="abt-buy"),
         notes=NOTES_20K,
     ),
     "synth-200k": DatasetSpec(
         name="synth-200k",
         default_root=Path("data/synth/abt-buy-train-200k"),
-        load=load_synthetic,
+        load=partial(load_synthetic, seed_dataset="abt-buy"),
         notes=NOTES_200K,
     ),
 }

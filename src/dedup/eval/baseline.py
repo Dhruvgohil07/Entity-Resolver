@@ -499,30 +499,51 @@ def floor_caveat(row: BaselineRow) -> str | None:
     )
 
 
+# Below this F1 gap between the test oracle and the train-chosen threshold, calling
+# the threshold a bad transfer overstates what is closer to a rounding difference --
+# an audit caught synth-20k's 0.0030 gap contradicting a flat "does not transfer"
+# claim printed regardless of the number.
+GAP_TRANSFERS_WELL = 0.01
+
+
 def _threshold_transfer_bullet(report: BaselineReport, size_ratio: float) -> str:
     """Whether train F1 lands below test F1 is measured per catalog, never asserted.
 
     On Abt-Buy it lands below, for the reason the first branch gives. On synth-20k
     it lands above, and printing the Abt-Buy explanation there would explain away
     a gap that does not exist.
+
+    Whether the train-chosen threshold itself transfers to test is a *separate*
+    question from that size effect, and it is answered the same way in both
+    branches: by the gap to the test oracle, not by asserting "does not transfer"
+    regardless of how small that gap measures.
     """
     variant = report.variants[0]
+    gap = variant.test_oracle.f1 - variant.test_point.f1
+    if gap < GAP_TRANSFERS_WELL:
+        transfer = (
+            f"it transfers well: the test oracle reaches only {gap:.4f} F1 higher, so "
+            f"re-tuning the cut with test labels in hand would have bought almost nothing "
+            f"on this split"
+        )
+    else:
+        transfer = (
+            f"it does not transfer well: the test oracle reaches {gap:.4f} F1 higher, real "
+            f"F1 a threshold search on test alone would have found"
+        )
     if variant.train_point.f1 < variant.test_point.f1:
         return f"""- **Train F1 comes out *below* test F1, and that is not a bug.** The train side holds
   {report.n_train_all_pairs:,} pairs against test's {report.n_test_all_pairs:,} — {size_ratio:.1f}x as many —
   while true pairs grow only linearly with records. At a fixed cosine threshold the false
   positives scale with the pair count and the true positives do not, so precision, and
-  with it F1, falls as the catalog grows. A single global threshold therefore does not
-  transfer across catalog sizes; the gap between the train-chosen threshold and the test
-  oracle above shows how little that cost here, but on a 200k-record `synth/` catalog it
-  is the whole problem."""
+  with it F1, falls as the catalog grows — a size effect, separate from whether the
+  train-chosen threshold carries over to test: {transfer}."""
     return f"""- **Train F1 comes out *above* test F1 on this catalog** ({variant.train_point.f1:.4f} against
   {variant.test_point.f1:.4f}), although the train side holds {report.n_train_all_pairs:,} pairs against
   test's {report.n_test_all_pairs:,} — {size_ratio:.1f}x as many. A fixed cosine threshold's false positives
   scale with the pair count and its true positives do not, which on its own pushes the larger
-  side's precision down; here that size effect did not dominate. A single global threshold
-  still does not transfer across catalog sizes, and the oracle column above measures what it
-  left on the table on this split."""
+  side's precision down; here that size effect did not dominate. That size effect is separate
+  from whether the train-chosen threshold carries over to test: {transfer}."""
 
 
 def _scope_bullet(report: BaselineReport) -> str:

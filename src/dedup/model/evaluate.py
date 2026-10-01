@@ -58,7 +58,7 @@ from dedup.model.calibrate import (
     reliability_bins,
 )
 from dedup.model.threshold import BandSummary, CostModel, band_summary
-from dedup.model.train import PreparedSplit, prepare
+from dedup.model.train import PairScorer, PreparedSplit, prepare
 from dedup.schema import Record
 
 DEFAULT_OUT = "reports/model.md"
@@ -149,6 +149,8 @@ class ModelReport:
     sensitivity: list[BandSummary]
     importance: list[tuple[str, float]]
     n_missed_confidently: int  # auto-rejected true pairs scored below CONFIDENT_NEGATIVE
+    scorer: PairScorer  # the fitted, calibrated artifact this report measured -- `--save-scorer`
+    # persists exactly this object, so the report and the artifact never drift apart
 
 
 def _split_stats(name: str, split: PreparedSplit) -> SplitStats:
@@ -277,6 +279,7 @@ def evaluate(
         ],
         importance=fit.scorer.gain_importance()[:IMPORTANCE_ROWS],
         n_missed_confidently=missed_confidently,
+        scorer=fit.scorer,
     )
 
 
@@ -624,6 +627,14 @@ def main(argv: list[str] | None = None) -> int:
         help="add the sentence-transformers column (downloads ~90 MB on first use)",
     )
     parser.add_argument("--out", type=Path, default=None, help="write the markdown report here")
+    parser.add_argument(
+        "--save-scorer",
+        type=Path,
+        default=None,
+        metavar="ROOT",
+        help="persist the fitted, calibrated PairScorer this report measured to ROOT "
+        "(PairScorer.save) -- service/batch.py loads it from there",
+    )
     args = parser.parse_args(argv)
 
     records = load_dataset(args.dataset, args.root)
@@ -653,6 +664,19 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(markdown + "\n", encoding="utf-8")
         print(f"\nwrote {args.out}", file=sys.stderr)
+
+    if args.save_scorer is not None:
+        digest = report.scorer.save(
+            args.save_scorer,
+            metadata={
+                "dataset": args.dataset,
+                "test_fraction": args.test_fraction,
+                "seed": args.seed,
+                "n_folds": args.folds,
+                "include_semantic": args.semantic,
+            },
+        )
+        print(f"wrote {args.save_scorer} (scorer sha256 {digest})", file=sys.stderr)
     return 0
 
 

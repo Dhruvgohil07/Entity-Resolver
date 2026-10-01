@@ -245,10 +245,41 @@ def test_a_run_that_left_a_blocker_out_says_its_union_is_not_the_default_ceiling
     assert "Not every default blocker ran: `lsh (minhash)` did not." in text
 
 
+def test_a_run_with_an_omission_calls_its_union_a_lower_bound_not_a_ceiling(catalog):
+    """reports/synth/blocking-200k.md called its --without lsh union "the ceiling" the rest
+    of the pipeline inherits -- wrong, since the omitted blocker could only add candidates.
+    "What this means" must hedge exactly where "Reading this honestly" already does."""
+    full = render_markdown(evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic"))
+    assert "hard ceiling on system recall" in full
+    assert "lower bound" not in full
+
+    report = evaluate(
+        catalog, [AnnBlocker(neighbours=2)], dataset="synthetic", omitted=["lsh (minhash)"]
+    )
+    text = " ".join(render_markdown(report).split())
+    assert "hard ceiling on system recall" not in text
+    assert "a **lower bound** on the default blocker set's ceiling, not the" in text
+
+
 def test_the_regenerate_command_reproduces_the_run(catalog):
     report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
     markdown = render_markdown(report, out="reports/synth/blocking.md", flags=" --ann-components 8")
     assert "--dataset synthetic --ann-components 8 --out reports/synth/blocking.md" in markdown
+
+
+def test_the_regenerate_command_includes_the_scale_flags(catalog):
+    # ann_neighbours and lsh_max_neighbours are the two levers blocking at
+    # scale needs; a regenerate command missing either is not reproducible.
+    report = evaluate(catalog, [AnnBlocker(neighbours=2)], dataset="synthetic")
+    markdown = render_markdown(
+        report,
+        out="reports/synth/blocking-200k.md",
+        flags=" --ann-components 128 --ann-neighbours 50 --lsh-max-neighbours 100",
+    )
+    assert (
+        "--dataset synthetic --ann-components 128 --ann-neighbours 50 "
+        "--lsh-max-neighbours 100 --out reports/synth/blocking-200k.md"
+    ) in markdown
 
 
 # ---------------------------------------------------------------------------
@@ -271,3 +302,59 @@ def test_the_published_union_ceiling_still_reproduces():
     # faiss being a dependency at all.
     best = max(report.rows, key=lambda r: r.pair_completeness)
     assert best.name.startswith("ann")
+
+
+# ---------------------------------------------------------------------------
+# Leave-one-out marginals
+
+
+def _two_blockers_finding_the_same_pairs(catalog):
+    """Two exact-key blockers over the same vendor codes: `code_token_keys`
+    indexes every code-shaped token, `model_number_keys` the single extracted
+    one, so the second finds a subset of the first's pairs."""
+    return [
+        StandardBlocker("codes", code_token_keys, params=""),
+        StandardBlocker("model number", model_number_keys, params=""),
+    ]
+
+
+def test_marginals_are_empty_unless_asked_for(catalog):
+    report = evaluate(catalog, _two_blockers_finding_the_same_pairs(catalog), dataset="synthetic")
+    assert report.marginals == ()
+
+
+def test_a_subsumed_blocker_reports_zero_marginal_completeness(catalog):
+    """The distinction the standalone table cannot draw: a blocker can score
+    well on its own row and still add nothing, because another blocker found
+    the same pairs. Leaving it out and re-unioning is what shows that."""
+    blockers = _two_blockers_finding_the_same_pairs(catalog)
+    report = evaluate(catalog, blockers, dataset="synthetic", leave_one_out=True)
+
+    assert [m.name for m in report.marginals] == ["codes", "model number"]
+    subsumed = next(m for m in report.marginals if m.name == "model number")
+    assert subsumed.marginal_pair_completeness == 0.0
+    assert subsumed.marginal_candidates == 0
+
+
+def test_marginals_sum_is_not_assumed_to_be_the_union(catalog):
+    """Marginals are leave-one-out, not a partition: two blockers finding the
+    same pair each report zero for it, so they do not add up to the union and
+    the report must never present them as if they did."""
+    blockers = _two_blockers_finding_the_same_pairs(catalog)
+    report = evaluate(catalog, blockers, dataset="synthetic", leave_one_out=True)
+    total = sum(m.marginal_pair_completeness for m in report.marginals)
+    assert total <= report.union_row.pair_completeness
+
+
+def test_the_marginal_table_is_rendered_and_names_what_is_subsumed(catalog):
+    blockers = _two_blockers_finding_the_same_pairs(catalog)
+    report = evaluate(catalog, blockers, dataset="synthetic", leave_one_out=True)
+    text = render_markdown(report, out="reports/blocking.md")
+    assert "What each blocker adds that the others do not" in text
+    assert "| `model number` | +0 | +0.0000 |" in text
+    assert "add no completeness the other blockers do not already have" in text
+
+
+def test_a_run_without_leave_one_out_renders_no_marginal_table(catalog):
+    report = evaluate(catalog, _two_blockers_finding_the_same_pairs(catalog), dataset="synthetic")
+    assert "What each blocker adds" not in render_markdown(report, out="reports/blocking.md")

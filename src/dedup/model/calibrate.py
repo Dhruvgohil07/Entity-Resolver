@@ -101,6 +101,76 @@ class PlattCalibrator:
         return np.asarray(self._model.predict_proba(scores.reshape(-1, 1))[:, 1], dtype=np.float64)
 
 
+
+class BetaCalibrator:
+    """Beta calibration: `sigmoid(a*log(s) - b*log(1-s) + c)`, fit by logistic
+    regression on those two transformed features.
+
+    Exists because the decisions log records a genuine standoff that neither
+    Platt nor isotonic resolves. Isotonic is the better *calibrated* of the two
+    at `synth-20k` scale and collapses exactly where the cost model reads --
+    6 distinct outputs at or above 0.9, against Platt's thousands -- so a
+    `p_hi` of 0.95 cannot separate pairs inside one atom. Platt keeps the
+    resolution and misstates the review band by up to 0.22, because a
+    two-parameter sigmoid cannot bend to a distribution this skewed.
+
+    Beta calibration is the standard answer to precisely that: it is still a
+    parametric, strictly monotone map, so it can never reorder pairs and never
+    collapses a range to one level, but its two shape parameters let it fit
+    asymmetric and heavily skewed score distributions that a plain sigmoid
+    cannot. Platt is the special case `a == b`.
+
+    Monotonicity is enforced, not assumed. The map rises with `s` when both
+    `a >= 0` and `b >= 0`, and `fit` refuses a fitted pair that violates it --
+    the same rule, for the same reason, as `PlattCalibrator`'s positive-slope
+    check: a calibrator that reordered pairs would change PR-AUC, letting
+    calibration flatter a ranking metric it has no business improving.
+    """
+
+    # Raw scores are LightGBM probabilities in [0, 1]; log(0) and log(1-1) are
+    # both -inf, which would propagate through the whole fit. Clipped rather
+    # than rejected because a booster legitimately produces exact 0.0 and 1.0.
+    _EPS = 1e-12
+
+    def __init__(self) -> None:
+        self._model: LogisticRegression | None = None
+
+    @classmethod
+    def _design(cls, scores: np.ndarray) -> np.ndarray:
+        clipped = np.clip(np.asarray(scores, dtype=np.float64), cls._EPS, 1.0 - cls._EPS)
+        return np.column_stack([np.log(clipped), -np.log1p(-clipped)])
+
+    def fit(self, scores: np.ndarray, labels: np.ndarray) -> BetaCalibrator:
+        scores = np.asarray(scores, dtype=np.float64)
+        labels = np.asarray(labels).astype(bool)
+        if scores.shape != labels.shape:
+            raise ValueError(f"scores and labels differ in shape: {scores.shape} vs {labels.shape}")
+        if labels.all() or not labels.any():
+            raise ValueError(
+                "calibration needs both classes present; got "
+                f"{int(labels.sum())} positives in {labels.size} pairs"
+            )
+        model = LogisticRegression(C=_PLATT_C).fit(self._design(scores), labels)
+        a, b = (float(c) for c in model.coef_[0])
+        if a < 0 or b < 0:
+            raise ValueError(
+                f"beta calibration fitted a={a:.4g}, b={b:.4g}; a negative coefficient makes the "
+                f"map non-monotone in the raw score, so calibrated probabilities would reorder "
+                f"pairs. Calibration must never reorder pairs -- PR-AUC would change under it."
+            )
+        self._model = model
+        return self
+
+    def transform(self, scores: np.ndarray) -> np.ndarray:
+        if self._model is None:
+            raise RuntimeError("BetaCalibrator.transform called before fit")
+        scores = np.asarray(scores, dtype=np.float64)
+        if scores.size == 0:
+            return np.empty(0, dtype=np.float64)
+        return np.asarray(
+            self._model.predict_proba(self._design(scores))[:, 1], dtype=np.float64
+        )
+
 @dataclass(frozen=True)
 class OutOfFoldScores:
     """Predictions on held-out folds, pooled -- the calibrator's training set."""

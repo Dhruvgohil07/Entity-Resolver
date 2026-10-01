@@ -54,10 +54,24 @@ def read_manifest(root: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_synthetic(root: Path) -> list[Record]:
-    """A generated catalog, refused if it no longer matches its manifest."""
+def load_synthetic(root: Path, *, seed_dataset: str | None = None) -> list[Record]:
+    """A generated catalog, refused if it no longer matches its manifest.
+
+    `seed_dataset`, when given, must match the manifest's recorded `seed_dataset` --
+    otherwise nothing ties a registry entry (e.g. `synth-20k`) to the benchmark it is
+    supposed to be derived from, and a catalog seeded from the wrong one would load
+    silently. This is a cheap self-consistency check against the manifest's own
+    claim; it does not verify that claim against the seed dataset's real records --
+    `synth.generate.verify_seed_provenance` does that, deliberately not from here,
+    so a normal load never needs the seed dataset present on disk.
+    """
     root = Path(root)
     manifest = read_manifest(root)
+    if seed_dataset is not None and manifest.get("seed_dataset") != seed_dataset:
+        raise ValueError(
+            f"{root} was seeded from {manifest.get('seed_dataset')!r}, not {seed_dataset!r} "
+            f"as this registry entry expects"
+        )
     report_split = {"side": "train", "test_fraction": DEFAULT_TEST_FRACTION, "seed": DEFAULT_SEED}
     if manifest.get("seed_split") != report_split:
         raise ValueError(

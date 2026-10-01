@@ -27,23 +27,41 @@ Training runs single-threaded and deterministic for the same reason
 `blocking/ann.py` builds its HNSW index on one thread: a committed report whose
 numbers drift between runs of identical input is not reproducible, and the cost
 here is seconds on a catalog this size.
+
+`PairScorer.save`/`.load` pickle the whole bundle, mirroring `data/synthetic.py`'s
+hash-plus-manifest pattern (write-time SHA-256, load-time refuse-on-mismatch)
+rather than its JSONL mechanism, which does not fit a booster or a calibrator.
+Unpickling runs arbitrary code; that is acceptable only because an artifact is
+produced by this project's own training path, never from untrusted input -- the
+same trust boundary `data/synthetic.py`'s manifest already accepts.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+import json
+import pickle
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
+import lightgbm
 import numpy as np
+import sklearn
 from lightgbm import LGBMClassifier
 
 from dedup.blocking.defaults import block_split
 from dedup.blocking.union import BlockerScore
 from dedup.eval.splits import count_true_pairs
+from dedup.features.base import FeatureSpec
 from dedup.features.vectorize import PairFeaturizer, pair_labels
 from dedup.normalize import NormalizedRecord, normalize
 from dedup.schema import Record
+
+SCORER_FILE = "scorer.pkl"
+MANIFEST_FILE = "manifest.json"
 
 DEFAULT_PARAMS: dict[str, object] = {
     "n_estimators": 300,
@@ -57,6 +75,75 @@ DEFAULT_PARAMS: dict[str, object] = {
     "force_col_wise": True,
     "n_jobs": 1,
 }
+
+# Columns the booster may only score *upward* on: more code agreement, or
+# more title agreement, can never lower a pair's probability.
+#
+# This is a constraint on what the booster is allowed to learn, not a tuning
+# knob, and it exists for a failure mode that was measured rather than
+# feared. On `synth-20k` the 44 highest-scored test pairs are all wrong and
+# the first true pair sits at rank 45, while `raw >= 0.99` is 92% precise
+# immediately below that. Those 43 false pairs score *below* the
+# all-candidate mean on every similarity column -- `model_number_exact`
+# 0.0000 against 0.0207, `title_tfidf_cosine` 0.0833 against 0.2167. They
+# are not confidently wrong because a feature misfires; they are unusually
+# dissimilar, and the booster has learned a genuine high-score region for
+# zero-evidence duplicates (the generator's alternate-part-number
+# corruption manufactures them, 62% of test's zero-evidence true pairs
+# against a 12% base rate) which also catches unrelated pairs. An
+# unconstrained tree is free to do that; a monotone one is not, because
+# "less code agreement, higher score" is exactly the shape it forbids.
+#
+# Deliberately *not* listed: `title_len_ratio` and every `desc_*` column.
+# `desc_len_ratio` measurably points backwards on Abt-Buy (0.2213 on true
+# pairs against 0.4763 on false) because same-side pairs are candidates
+# under the deduplication framing, and a length ratio is the wrong shape
+# for this constraint whatever catalog it is read on. Constraining a column
+# that genuinely falls with similarity would cost accuracy to buy nothing.
+MONOTONE_INCREASING_FEATURES = frozenset(
+    {
+        # Vendor codes -- the columns that dominate the feature ranking.
+        "model_number_exact",
+        "model_number_prefix_ratio",
+        "code_token_jaccard",
+        "code_token_shared_count",
+        "code_best_ratio",
+        # Title similarity. Every one of these is a similarity in [0, 1]
+        # that rises with agreement; none is a ratio of lengths.
+        "title_ratio",
+        "title_token_sort_ratio",
+        "title_token_set_ratio",
+        "title_partial_ratio",
+        "title_token_jaccard",
+        "title_token_containment",
+        "title_common_prefix_ratio",
+        "title_idf_overlap",
+        "title_tfidf_cosine",
+    }
+)
+
+
+def monotone_constraints(specs: Sequence[FeatureSpec]) -> list[int]:
+    """LightGBM's positional constraint vector for one feature layout.
+
+    Positional, because `train_scorer` fits on `matrix.values` and never
+    hands LightGBM the column names -- so this has to be derived from the
+    same `specs` tuple that produced the array, never written down as a
+    literal. A name in `MONOTONE_INCREASING_FEATURES` that no longer
+    resolves raises here rather than silently constraining nothing: a
+    renamed column would otherwise drop its constraint with no test failing,
+    which is the same silent-drift problem `companion_indicator` exists to
+    prevent one layer down.
+    """
+    names = [spec.name for spec in specs]
+    unresolved = sorted(MONOTONE_INCREASING_FEATURES.difference(names))
+    if unresolved:
+        raise ValueError(
+            f"MONOTONE_INCREASING_FEATURES names {unresolved}, which the feature registry "
+            f"does not define. A constraint that resolves to nothing is not a constraint -- "
+            f"rename it here or drop it."
+        )
+    return [1 if name in MONOTONE_INCREASING_FEATURES else 0 for name in names]
 
 
 class Calibrator(Protocol):
@@ -170,6 +257,90 @@ class PairScorer:
             key=lambda row: -row[1],
         )
 
+    def save(self, root: Path, *, metadata: Mapping[str, object] | None = None) -> str:
+        """Pickle this scorer to `root/scorer.pkl`, write a sibling manifest, return the hash.
+
+        Featurizer, booster and calibrator are pickled together as one object --
+        the same "servable artifact" bundling this class exists for in the first
+        place, so a caller cannot accidentally load a booster against a
+        differently-fit featurizer. `metadata` is the training provenance a
+        caller wants traceable later (dataset name, split params, seed); it is
+        opaque here and just passed through into the manifest.
+        """
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        payload = pickle.dumps(self)
+        digest = hashlib.sha256(payload).hexdigest()
+        (root / SCORER_FILE).write_bytes(payload)
+        body = {
+            "artifact_sha256": digest,
+            "feature_names": self.feature_names,
+            "n_features": len(self.feature_names),
+            "include_semantic": self.featurizer.include_semantic,
+            "has_calibrator": self.calibrator is not None,
+            "booster_type": type(self.booster).__name__,
+            "lightgbm_version": lightgbm.__version__,
+            "sklearn_version": sklearn.__version__,
+            "created_at": datetime.now(UTC).isoformat(),
+            "metadata": dict(metadata or {}),
+        }
+        (root / MANIFEST_FILE).write_text(
+            json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return digest
+
+    @classmethod
+    def load(cls, root: Path) -> PairScorer:
+        """The inverse of `save`, refused if the artifact no longer matches its manifest.
+
+        Library-version fields are recorded but not enforced: a hard refusal on
+        a routine LightGBM/scikit-learn patch bump would block ordinary dev
+        iteration far more often than it would catch a real skew, and pickle's
+        own cross-version fragility is an accepted, documented limitation here
+        rather than something a manifest field can fix.
+        """
+        root = Path(root)
+        manifest = read_scorer_manifest(root)
+        payload = (root / SCORER_FILE).read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != manifest["artifact_sha256"]:
+            raise ValueError(
+                f"{root / SCORER_FILE} does not match the hash in its manifest -- it was "
+                f"edited, truncated, or regenerated without its manifest"
+            )
+        scorer = pickle.loads(payload)
+        if not isinstance(scorer, cls):
+            raise TypeError(f"{root / SCORER_FILE} does not hold a {cls.__name__}")
+        if scorer.feature_names != manifest["feature_names"]:
+            raise ValueError(
+                f"{root} was pickled with feature columns {scorer.feature_names}, but its "
+                f"manifest records {manifest['feature_names']} -- the featurizer that produced "
+                f"this artifact no longer matches the one described alongside it"
+            )
+        if (scorer.calibrator is not None) != manifest["has_calibrator"]:
+            raise ValueError(
+                f"{root} {'has' if scorer.calibrator is not None else 'has no'} a calibrator, "
+                f"but its manifest says has_calibrator={manifest['has_calibrator']}"
+            )
+        return scorer
+
+
+def read_scorer_manifest(root: Path) -> dict[str, object]:
+    """A saved scorer's manifest, without unpickling the artifact itself.
+
+    Public like `data.synthetic.read_manifest`, for a caller that only wants
+    the hash or feature names -- `service/batch.py`'s `runs` row, for one --
+    and should not have to pay for (or trust) unpickling to get them.
+    """
+    path = Path(root) / MANIFEST_FILE
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{root} has no {MANIFEST_FILE}, so it is not a saved PairScorer. Save one with "
+            f"`PairScorer.save` or `python -m dedup.model.evaluate --save-scorer` "
+            f"(CLAUDE.md > Commands)."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
 
 def train_scorer(
     split: PreparedSplit,
@@ -187,6 +358,17 @@ def train_scorer(
     """
     featurizer = PairFeaturizer(include_semantic=include_semantic).fit(split.records)
     matrix = featurizer.transform(split.records, split.pair_keys)
-    booster = LGBMClassifier(**{**DEFAULT_PARAMS, **(params or {}), "random_state": seed})
+    booster = LGBMClassifier(
+        **{
+            **DEFAULT_PARAMS,
+            # Derived from this featurizer's own layout, not a literal --
+            # `include_semantic` changes the column count, so a fixed vector
+            # would be wrong for one of the two shapes. Before `params`, so
+            # a caller can still measure the unconstrained booster.
+            "monotone_constraints": monotone_constraints(matrix.specs),
+            **(params or {}),
+            "random_state": seed,
+        }
+    )
     booster.fit(matrix.values, split.labels)
     return PairScorer(featurizer=featurizer, booster=booster)
