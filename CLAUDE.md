@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Ten stages implemented (`pytest` → 696 passing, 1 skipped; coverage not re-measured this sync).
+Ten stages implemented (`pytest` → 714 passing, 1 skipped; coverage not re-measured this sync).
 Two things are **not** covered by that run, and both are called out where they belong rather than
 folded into the count: the `semantic.py` carve-out inside the `features/` bullet, and the five
 report CLI entry points under the list.
@@ -206,23 +206,52 @@ report CLI entry points under the list.
   than deleting it. Promoting any of them to a committed `reports/` artifact is still open, as a
   separate decision from whether they are currently trustworthy -- they now are.
 
-Implemented but **untested**: the five CLI entry points — `main()` in `eval/baseline.py`,
-`blocking/evaluate.py`, `features/evaluate.py`, `model/evaluate.py` and `cluster/evaluate.py`.
-Every test calls the functions beneath them (`evaluate`, `render_markdown`) directly and none
-calls a `main()`, so coverage shows every line of all five unexecuted: argument parsing, dataset
-resolution, `--out` writing, the `--cost-*` flags, blocking's `--without` and `--ann-components`,
-and the baseline's `--min-similarity` would not fail a test run if they broke.
-All five were run by hand for this sync, on Abt-Buy and on `synth-20k`, plus `blocking` on
-`synth-200k` -- not as a reproduction check but because their reports changed again: the second fix
-to `_qualifies_as_model_number` (apertures and prose are no longer model numbers) moved extraction,
-as the first fix and `monotone_constraints` had before it. Each report's own "Regenerate with" block
-records the exact command used, which is what made regenerating twelve of them mechanical rather
-than archaeological. Two came back **byte-identical** and are worth naming, because that is a
-result and not an absence of one: `reports/baseline_tfidf.md` and `reports/synth/baseline_tfidf.md`,
-which confirms extraction does not reach the normalized title the baseline scores.
-`synth.generate`'s `main()` is the exception to the paragraph above and now covers its
-`--report-only` path too, including both argument combinations it refuses. Those are checks made
-once, not guards.
+**Every `main()` in the project is now tested.** The five report CLI entry points — `eval/baseline.py`,
+`blocking/evaluate.py`, `features/evaluate.py`, `model/evaluate.py`, `cluster/evaluate.py` — were the
+long-standing exception: every test called the functions beneath them (`evaluate`,
+`render_markdown`) directly, so coverage showed argument parsing, dataset resolution, `--out`
+writing and every flag branch unexecuted, and breaking any of them would not have failed a test
+run. `tests/test_cli_smoke.py` closes that, and it asserts **plumbing rather than numbers** on
+purpose: the exit code, that `--out` wrote a markdown file, that stdout is the default sink, that an
+unknown `--dataset` is refused at parse time, and that each flag reaches the rendered report
+(`--min-similarity` prints its floor, `--without` names the omitted blocker *and* calls the union a
+lower bound, `--leave-one-out` renders the marginal table, blocking's three scale flags parse
+together, `--save-scorer` writes a *calibrated* scorer the serving half can load, and a cost model
+with no review band is refused through the CLI). The published figures stay pinned by the per-stage
+report tests, which call `evaluate()` directly and so cannot notice a broken CLI; the two halves are
+complementary and neither replaces the other.
+
+Three of the five run on the committed 7-record fixtures, so they guard a fresh clone with no
+benchmark. `model` and `cluster` cannot, and the reason is recorded so it is not rediscovered: an
+entity-grouped 0.3 split of the fixtures' 4 entities leaves 2 in train, so `--folds 5` fails the
+fold check and `--folds 2` gets past it only to hand LightGBM an empty blocked candidate set. Both
+are `@needs_data` instead, joining the tests that skip when `data/raw/` is absent.
+
+`tests/test_pipeline_e2e.py` adds what no per-stage test can: the **handoffs**. A per-stage test
+verifies what a stage computes from input it builds itself, so two stages whose contract has drifted
+apart can leave both tests green. One walk goes raw CSV → `Record` → entity-grouped split →
+`normalize` → blocking → `features`, checking the boundary invariants where they actually bind (no
+entity spans both splits; packed keys sorted, deduplicated and upper-triangular; the recall
+denominator computed from records rather than the candidate set; no non-finite value in the matrix;
+every imputed column's companion indicator resolving to a real column; and `block_unlabeled`
+emitting exactly `block_split`'s candidate set, since a second blocker list is how train/serve skew
+starts). The other carries an artifact across the **one seam between the project's two halves** —
+`model/evaluate.py --save-scorer` is the only thing that persists a scorer and `service/batch.py`
+only ever loads one, so that file on disk *is* the interface, and until now nothing tested it: model
+CLI → batch CLI → `build_index` CLI → `POST /lookup` → a review decision, each step through its real
+entry point.
+
+All five report CLIs were also run by hand for this sync, on Abt-Buy and on `synth-20k`, plus
+`blocking` on `synth-200k` -- not as a reproduction check but because their reports changed again:
+the second fix to `_qualifies_as_model_number` (apertures and prose are no longer model numbers)
+moved extraction, as the first fix and `monotone_constraints` had before it. Each report's own
+"Regenerate with" block records the exact command used, which is what made regenerating twelve of
+them mechanical rather than archaeological. Two came back **byte-identical** and are worth naming,
+because that is a result and not an absence of one: `reports/baseline_tfidf.md` and
+`reports/synth/baseline_tfidf.md`, which confirms extraction does not reach the normalized title the
+baseline scores. What is still a check made once rather than a guard is the *regeneration* itself:
+no test asserts that a committed report still reproduces, so a figure can go stale exactly the way
+the leave-one-out tables did (see Open questions). That is the remaining gap of this kind.
 
 `data/__init__.py`'s `DATASETS` registry and `load_dataset()` were the long-standing untested gap
 — exercised only by the CLIs, so a break would not have failed a test run — and
@@ -1253,7 +1282,7 @@ These work today:
 pip install -e ".[dev]"
 
 # tests
-pytest                                  # all (696 passing, 1 skipped)
+pytest                                  # all (714 passing, 1 skipped)
 pytest tests/test_normalize.py          # one file
 pytest tests/test_normalize.py::test_model_number_trailing_convention   # one test
 pytest -k model_number                  # by keyword
@@ -1318,7 +1347,7 @@ python -m dedup.blocking.evaluate --dataset synth-200k --ann-components 128 --an
 ```
 
 Tests run without any dataset present: they use committed fixtures under `tests/fixtures/abt-buy/`.
-Thirty-four tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
+Thirty-eight tests read `data/raw/` and skip when the benchmark has not been downloaded: the loader's
 integration test in `tests/test_data_abt_buy.py`, one in `tests/test_eval_baseline.py` that
 re-derives the published baseline F1, one in `tests/test_blocking_evaluate.py` that re-derives the
 published union pair completeness, four in `tests/test_features_evaluate.py` that re-derive the
@@ -1328,9 +1357,12 @@ accounting, eleven in `tests/test_cluster_evaluate.py` that re-derive the compon
 measured while planning the stage, the floor and ceiling, the chaining demonstration, the
 objective-against-truth result, and that merging nothing bills exactly what the model report's
 bands route, one in `tests/test_synth_realism.py` that re-derives the synthetic catalog's
-calibration against Abt-Buy's train split, and one in `tests/test_data_synthetic.py` that reloads
+calibration against Abt-Buy's train split, one in `tests/test_data_synthetic.py` that reloads
 Abt-Buy fresh and re-derives its split to verify the committed `synth-20k` catalog's seed
-provenance independently of what its own manifest claims. So a green run does *not* by itself mean
+provenance independently of what its own manifest claims, three in `tests/test_cli_smoke.py` for the
+`model` and `cluster` CLIs the fixtures are too small to drive, and one in
+`tests/test_pipeline_e2e.py` that carries a scorer from the model CLI through the batch CLI,
+`build_index` and `POST /lookup`. So a green run does *not* by itself mean
 the real files were checked, and in particular does not mean any published number was reproduced —
 `pytest -rs` reports the skips.
 
