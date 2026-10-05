@@ -2,8 +2,8 @@
 
 CLAUDE.md requires a calibrated probability because the cost model consumes one:
 an uncalibrated score makes the threshold sweep meaningless. Two questions that
-leaves open were settled by measurement and are recorded in CLAUDE.md's
-decisions log; this module implements those answers rather than re-opening them.
+leaves open were settled by measurement and are recorded in the decisions log,
+docs/DECISIONS.md; this module implements those answers rather than re-opening them.
 
 **Fit out of fold, not on a held-out third split.** A calibrator fit on the rows
 the trees were fit on is fit to memorized labels, so the third split is the

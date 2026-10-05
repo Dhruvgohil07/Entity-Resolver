@@ -76,7 +76,9 @@ is enforced at construction rather than by review.
 
 ```
 Entity-Resolver/
-├── CLAUDE.md                       project rules, invariants, decisions log
+├── CLAUDE.md                       project rules, invariants, conventions
+├── docs/DECISIONS.md               decisions log: open questions and settled measurements
+├── docs/plans/                     work plans, one dated file each (see CLAUDE.md, Plans)
 ├── README.md                       this file
 ├── pyproject.toml                  deps, ruff (line 100, py310), pytest config
 │
