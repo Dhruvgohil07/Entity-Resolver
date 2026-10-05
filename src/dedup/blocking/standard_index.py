@@ -8,7 +8,7 @@ df=29 becomes common at df=31, so every *existing* record's keys could
 change on every insert. That is not an index that can be incrementally
 maintained; it would need a full rebuild on every insert, defeating the
 point of having one. Excluded, not deferred quietly: a real, unmeasured
-recall gap against the batch path (CLAUDE.md, Open questions).
+recall gap against the batch path (docs/DECISIONS.md, Open questions).
 
 No vocabulary-freeze problem here, unlike `blocking/ann.py`'s `AnnIndex` --
 both key functions are computed fresh per record, so a genuinely new code

@@ -34,7 +34,7 @@ when it should not auto-merge a whole cluster on that one edge alone.
 `decide()` never asks whether two *existing* clusters should merge, only
 which one cluster the new record joins; a repeated pattern of strong
 review-links between the same two clusters is a signal a full batch re-run
-would eventually resolve and this cannot (CLAUDE.md, Open questions).
+would eventually resolve and this cannot (docs/DECISIONS.md, Open questions).
 """
 
 from __future__ import annotations
