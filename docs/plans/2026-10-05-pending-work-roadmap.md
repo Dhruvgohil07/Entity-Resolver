@@ -15,6 +15,12 @@ Any task that settles an entry in `docs/DECISIONS.md` updates that entry in the 
 
 Do 1.1 first, so 1.2–1.4 regenerate under a guard rather than by hand.
 
+**Decomposed into tasks in `docs/plans/2026-10-06-phase-1-stale-numbers.md`**, which measured the
+ground first and revised three of these estimates: the committed reports all reproduce today, so
+what is actually stale is the one-off figures in `docs/DECISIONS.md` that never became reports —
+making 1.2, 1.3 and 1.4 each M rather than S, because each needs its CLI flag built before the
+measurement can be run reproducibly. 1.6 also moves ahead of 1.3, which depends on its output.
+
 - [ ] **1.1 Report-reproduction test** (M). Regenerate each committed report's key figures and
   compare them with the committed file. *Done when* a change to extraction or the model fails a
   test instead of silently leaving a report stale.

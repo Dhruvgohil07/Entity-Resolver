@@ -183,6 +183,16 @@ wrong.
   not prove any published number reproduced -- check `pytest -rs`.
 - One test always skips unless the sentence-transformers weights are downloaded (`--semantic` is
   opt-in).
+- `tests/test_report_reproduction.py` re-runs each committed report's own recorded command and
+  compares the result byte for byte, so a change that moves a published figure fails a test instead
+  of leaving the report stale. The blocking tables' two wall-clock columns are masked -- the only
+  cells in the whole set that vary between runs, which `reports/blocking.md` states in its header.
+  The five `abt-buy` reports run by default and cost ~125 s of the suite's ~383 s; the seven that
+  read a synthetic catalog skip unless `DEDUP_REPRODUCE_SLOW=1` is set, which adds ~30 minutes.
+  Reports are discovered by globbing `reports/`, so a new one is guarded as soon as it is committed
+  -- and must carry a "Regenerate with" block naming its own path.
+- Time the suite with nothing else running. LightGBM and faiss both multi-thread by default, so a
+  concurrent second suite oversubscribes the CPU and inflates the total several-fold.
 - `tests/test_cli_smoke.py` covers every CLI's plumbing; `tests/test_pipeline_e2e.py` covers the
   handoffs between stages, including the saved-scorer seam between `model/` and `service/`.
 - Add a regression test named after the failure mode for every bug fixed.

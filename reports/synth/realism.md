@@ -14,7 +14,7 @@ The catalog is a fixed artifact and is **not** rewritten by that command. It was
 written by
 
 ```bash
-python -m dedup.synth.generate --seed-dataset abt-buy --records 20000 --seed 0 --out data/synth/abt-buy-train-20k --report reports/synth/realism.md
+python -m dedup.synth.generate --seed-dataset abt-buy --records 20000 --seed 0 --out data/synth/abt-buy-train-20k
 ```
 
 against the `normalize.py` of the day. `families.base_product` picks a seed
