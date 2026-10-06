@@ -384,10 +384,20 @@ def render_realism(
         else ""
     )
     notes = "\n".join(_reading_notes(seed, synthetic, manifest))
+    # Under `--report-only` this is a record of what produced the catalog, not a
+    # command to run, so every part of it comes from the catalog's own manifest
+    # -- and `--report` is deliberately absent. A report path is no part of
+    # writing a catalog, and including the *current* one made the historical
+    # block claim a `--report` that never ran: re-rendering to a scratch path
+    # rewrote the record of how the artifact was built. Provenance that changes
+    # when you read it is not provenance.
     generate_command = (
         f"python -m dedup.synth.generate --seed-dataset {manifest.get('seed_dataset')} "
-        f"--records {target} --seed {config.get('seed')} --out {catalog} --report {out}"
+        f"--records {target} --seed {config.get('seed')} --out {catalog}"
     )
+    # The regenerate-everything path is the opposite case: it *is* a command to
+    # run, and it writes this report, so it names it.
+    generate_with_report_command = f"{generate_command} --report {out}"
     report_only_command = (
         f"python -m dedup.synth.generate --seed-dataset {manifest.get('seed_dataset')} "
         f"--out {catalog} --report {out} --report-only"
@@ -410,7 +420,7 @@ against the `normalize.py` of the day. `families.base_product` picks a seed
 family's base listing by `model_number_key`, so running that now would write a
 *different* catalog rather than reproduce this one."""
     else:
-        regenerate = f"Regenerate with:\n\n```bash\n{generate_command}\n```"
+        regenerate = f"Regenerate with:\n\n```bash\n{generate_with_report_command}\n```"
 
     return f"""# Synthetic catalog: how hard its duplicates are
 

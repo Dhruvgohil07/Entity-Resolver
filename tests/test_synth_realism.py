@@ -115,6 +115,33 @@ def test_a_catalog_matching_its_seeds_is_called_within_tolerance():
     assert "outside" not in text
 
 
+def test_the_provenance_block_does_not_track_the_report_path_it_is_rendered_to():
+    """The regression: under `--report-only` the "it was written by" block was
+    built from the *current* `--report`, so re-rendering to a scratch path made
+    the report claim the catalog had been generated with a `--report` that never
+    ran. Provenance that changes when you read it is not provenance. The
+    historical command names no report at all now -- a report path is no part of
+    writing a catalog -- so the block is identical whatever it is rendered to.
+
+    The re-render command above it is the opposite case and *must* track the
+    path, since it is a command to run that writes this report."""
+    stats = small_catalog()
+    kwargs = {"catalog": "data/synth/x", "report_only": True}
+    committed = flat(render_realism(stats, stats, MANIFEST, out="reports/synth/r.md", **kwargs))
+    scratch = flat(render_realism(stats, stats, MANIFEST, out="scratch.md", **kwargs))
+
+    # `flat` collapses the fence onto the command, so the historical block reads
+    # "... --out data/synth/x ```" -- the backticks are what pin that the command
+    # ends at the catalog and never grew a --report.
+    historical = "--records 4 --seed 0 --out data/synth/x ```"
+    assert historical in committed
+    assert historical in scratch
+
+    # The re-render command is the one thing that may differ between the two.
+    assert "--out data/synth/x --report reports/synth/r.md --report-only" in committed
+    assert "--out data/synth/x --report scratch.md --report-only" in scratch
+
+
 def test_a_catalog_off_target_names_what_is_outside_tolerance():
     seeds = small_catalog()
     synthetic = replace(seeds, code_equal=seeds.code_equal - 0.2)
